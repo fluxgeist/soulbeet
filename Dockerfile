@@ -52,7 +52,7 @@ ENV PATH="$VIRTUAL_ENV/bin:$PATH"
 
 # Install beets and dependencies
 RUN pip install --no-cache-dir wheel
-RUN pip install --no-cache-dir beets requests musicbrainzngs
+RUN pip install --no-cache-dir beets requests musicbrainzngs pillow
 
 # rewrite shebang line in the executable script.
 RUN sed -i '1s|^.*$|#!/usr/bin/python3|' $VIRTUAL_ENV/bin/beet

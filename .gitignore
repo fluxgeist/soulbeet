@@ -13,5 +13,8 @@ soulbeet.db
 soulbeet.db-shm
 soulbeet.db-wal
 
+# Deployment folder (personal configs and data)
+deployment/
+
 # Env files
 **/.env
