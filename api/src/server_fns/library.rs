@@ -84,17 +84,17 @@ pub async fn delete_library_album(
         .await
         .map_err(|e| server_error(format!("Failed to delete album directory: {}", e)))?;
 
-    // 2. Remove from beets DB
+    // 2. Remove from beets DB by path (more reliable than artist/album query)
     let config_path =
         std::env::var("BEETS_CONFIG").unwrap_or_else(|_| "beets_config.yaml".to_string());
 
-    let query = format!("albumartist:{} album:{}", artist, album);
+    let path_query = format!("path:{}", album_path);
 
     let mut child = Command::new("beet")
         .arg("-c")
         .arg(&config_path)
         .arg("remove")
-        .arg(&query)
+        .arg(&path_query)
         .stdin(std::process::Stdio::piped())
         .spawn()
         .map_err(|e| server_error(format!("Failed to spawn beet remove: {}", e)))?;
