@@ -27,8 +27,8 @@ COPY lib/soulbeet/Cargo.toml lib/soulbeet/
 # Copy source code
 COPY . .
 
-# Install Tailwind dependencies
-RUN npm install
+# Install Tailwind dependencies (force linux-arm64 native binding)
+RUN npm install && npm install @tailwindcss/oxide-linux-arm64-gnu
 
 # Build the Tailwind CSS
 RUN npx @tailwindcss/cli -i ./web/assets/input.css -o ./web/assets/tailwind.css
