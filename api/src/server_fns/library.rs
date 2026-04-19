@@ -20,35 +20,49 @@ use rusqlite;
 pub async fn get_library() -> Result<Vec<AlbumEntry>, ServerFnError> {
     let _claims = auth.0;
 
-    let config_path =
-        std::env::var("BEETS_CONFIG").unwrap_or_else(|_| "beets_config.yaml".to_string());
+    let library_dir = std::env::var("BEETS_LIBRARY_DIR")
+        .unwrap_or_else(|_| "/app/library".to_string());
 
-    let output = Command::new("beet")
-        .arg("-c")
-        .arg(&config_path)
-        .arg("ls")
-        .arg("-f")
-        .arg("$path|||$albumartist|||$album")
-        .output()
-        .await
-        .map_err(|e| server_error(format!("Failed to query beets library: {}", e)))?;
+    let beets_db = std::env::var("BEETS_DB")
+        .unwrap_or_else(|_| "/data/musiclibrary.db".to_string());
 
-    let stdout = String::from_utf8_lossy(&output.stdout);
+    let library_dir_clone = library_dir.clone();
+    let rows: Vec<(String, String, String)> = tokio::task::spawn_blocking(move || {
+        let db = rusqlite::Connection::open(&beets_db)?;
+        let mut stmt = db.prepare(
+            "SELECT CAST(path AS TEXT), albumartist, album FROM items WHERE albumartist != '' AND album != ''"
+        )?;
+        let rows: Vec<(String, String, String)> = stmt
+            .query_map([], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                ))
+            })?
+            .filter_map(|r| r.ok())
+            .map(|(rel_path, artist, album)| {
+                let full_path = if rel_path.starts_with('/') {
+                    rel_path
+                } else {
+                    format!("{}/{}", library_dir_clone, rel_path)
+                };
+                (full_path, artist, album)
+            })
+            .collect();
+        Ok::<_, rusqlite::Error>(rows)
+    })
+    .await
+    .map_err(|e| server_error(format!("Task error: {}", e)))?
+    .map_err(|e| server_error(format!("Failed to query beets DB: {}", e)))?;
+
     let mut album_map: HashMap<(String, String), (usize, String)> = HashMap::new();
 
-    for line in stdout.lines() {
-        let parts: Vec<&str> = line.split("|||").collect();
-        if parts.len() < 3 {
-            continue;
-        }
-        let path = parts[0].trim().to_string();
-        let artist = parts[1].trim().to_string();
-        let album = parts[2].trim().to_string();
-
+    for (path, artist, album) in rows {
         let album_dir = Path::new(&path)
             .parent()
             .map(|p| p.to_string_lossy().to_string())
-            .unwrap_or_default();
+            .unwrap_or_else(|| format!("{}/{}/{}", library_dir, artist, album));
 
         let entry = album_map
             .entry((artist.clone(), album.clone()))
@@ -84,32 +98,31 @@ pub async fn delete_library_album(
         .await
         .map_err(|e| server_error(format!("Failed to delete album directory: {}", e)))?;
 
-    // 2. Remove from beets DB by path (more reliable than artist/album query)
-    let config_path =
-        std::env::var("BEETS_CONFIG").unwrap_or_else(|_| "beets_config.yaml".to_string());
-
-    let path_query = format!("path:{}", album_path);
-
-    let mut child = Command::new("beet")
-        .arg("-c")
-        .arg(&config_path)
-        .arg("remove")
-        .arg(&path_query)
-        .stdin(std::process::Stdio::piped())
-        .spawn()
-        .map_err(|e| server_error(format!("Failed to spawn beet remove: {}", e)))?;
-
-    if let Some(mut stdin) = child.stdin.take() {
-        stdin
-            .write_all(b"y\n")
-            .await
-            .map_err(|e| server_error(format!("Failed to write to beet stdin: {}", e)))?;
-    }
-
-    child
-        .wait()
-        .await
-        .map_err(|e| server_error(format!("beet remove failed: {}", e)))?;
+    // 2. Remove from beets DB directly via SQLite
+    let beets_db = std::env::var("BEETS_DB")
+        .unwrap_or_else(|_| "/data/musiclibrary.db".to_string());
+    let library_dir = std::env::var("BEETS_LIBRARY_DIR")
+        .unwrap_or_else(|_| "/app/library".to_string());
+    let album_path_clone = album_path.clone();
+    let artist_clone = artist.clone();
+    let album_clone = album.clone();
+    tokio::task::spawn_blocking(move || {
+        let db = rusqlite::Connection::open(&beets_db)?;
+        // Strip library dir prefix to get relative path prefix stored in DB
+        let rel_prefix = album_path_clone
+            .strip_prefix(&format!("{}/", library_dir))
+            .unwrap_or(&album_path_clone)
+            .to_string();
+        // Delete by relative path prefix first, fall back to artist+album
+        let deleted = db.execute(
+            "DELETE FROM items WHERE CAST(path AS TEXT) LIKE ?1 OR (albumartist = ?2 AND album = ?3)",
+            rusqlite::params![format!("{}%", rel_prefix), artist_clone, album_clone],
+        )?;
+        tracing::info!("Removed {} items from beets DB", deleted);
+        Ok::<_, rusqlite::Error>(())
+    })
+    .await
+    .ok();
 
     // 3. Clear beets incremental import history for this album
     //    state.pickle taghistory stores original download paths — match on album folder name
