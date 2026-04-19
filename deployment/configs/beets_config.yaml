@@ -1,4 +1,4 @@
-directory: /app/music/Library
+directory: /app/library
 library: /data/musiclibrary.db
 
 
