@@ -71,7 +71,7 @@ WORKDIR /app
 
 # Copy artifacts from builder
 COPY --from=builder /app/target/dx/web/release/web /app/server
-COPY beets_config.yaml /app/beets_config.yaml
+
 
 # Copy empty data directory to ensure /data exists
 COPY --from=builder /empty_data /data
