@@ -111,7 +111,37 @@ pub async fn delete_library_album(
         .await
         .map_err(|e| server_error(format!("beet remove failed: {}", e)))?;
 
-    // 3. Remove from Navidrome DB directly via SQLite
+    // 3. Clear beets incremental import history for this album
+    //    state.pickle taghistory stores original download paths — match on album folder name
+    let album_folder = Path::new(&album_path)
+        .file_name()
+        .map(|n| n.to_string_lossy().to_string())
+        .unwrap_or_default();
+
+    let _ = Command::new("python3")
+        .arg("-c")
+        .arg(format!(
+            r#"
+import pickle, os
+state_path = "/root/.config/beets/state.pickle"
+if not os.path.exists(state_path):
+    exit(0)
+with open(state_path, "rb") as f:
+    state = pickle.load(f)
+history = state.get("taghistory", set())
+before = len(history)
+history = {{e for e in history if not any(part.decode("utf-8", errors="replace").split("/")[-1] == "{}" for part in e if isinstance(part, bytes))}}
+state["taghistory"] = history
+with open(state_path, "wb") as f:
+    pickle.dump(state, f)
+print(f"Cleared {{before - len(history)}} entries from taghistory")
+"#,
+            album_folder
+        ))
+        .output()
+        .await;
+
+    // 4. Remove from Navidrome DB directly via SQLite
     if let Ok(navidrome_db) = std::env::var("NAVIDROME_DB_PATH") {
         let album_name = album.clone();
         let artist_name = artist.clone();
