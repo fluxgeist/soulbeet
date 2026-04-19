@@ -13,6 +13,8 @@ use std::path::Path;
 use tokio::io::AsyncWriteExt;
 #[cfg(feature = "server")]
 use tokio::process::Command;
+#[cfg(feature = "server")]
+use rusqlite;
 
 #[get("/api/library", auth: AuthSession)]
 pub async fn get_library() -> Result<Vec<AlbumEntry>, ServerFnError> {
@@ -109,18 +111,28 @@ pub async fn delete_library_album(
         .await
         .map_err(|e| server_error(format!("beet remove failed: {}", e)))?;
 
-    // 3. Trigger Navidrome scan via curl
-    let navidrome_url =
-        std::env::var("NAVIDROME_URL").unwrap_or_else(|_| "http://navidrome:4533".to_string());
-    let navidrome_user = std::env::var("NAVIDROME_USER").unwrap_or_default();
-    let navidrome_pass = std::env::var("NAVIDROME_PASSWORD").unwrap_or_default();
-
-    if !navidrome_user.is_empty() {
-        let scan_url = format!(
-            "{}/rest/startScan?u={}&p={}&v=1.16.1&c=soulbeet&f=json&fullScan=true",
-            navidrome_url, navidrome_user, navidrome_pass
-        );
-        let _ = Command::new("curl").arg("-s").arg(&scan_url).output().await;
+    // 3. Remove from Navidrome DB directly via SQLite
+    if let Ok(navidrome_db) = std::env::var("NAVIDROME_DB_PATH") {
+        let album_name = album.clone();
+        let artist_name = artist.clone();
+        tokio::task::spawn_blocking(move || {
+            let db = rusqlite::Connection::open(&navidrome_db)?;
+            // Find album ID by name + artist
+            let album_id: Option<String> = db
+                .query_row(
+                    "SELECT id FROM album WHERE name = ?1 AND album_artist = ?2",
+                    rusqlite::params![album_name, artist_name],
+                    |row| row.get(0),
+                )
+                .ok();
+            if let Some(id) = album_id {
+                db.execute("DELETE FROM media_file WHERE album_id = ?1", rusqlite::params![id])?;
+                db.execute("DELETE FROM album WHERE id = ?1", rusqlite::params![id])?;
+            }
+            Ok::<_, rusqlite::Error>(())
+        })
+        .await
+        .ok();
     }
 
     Ok(())
