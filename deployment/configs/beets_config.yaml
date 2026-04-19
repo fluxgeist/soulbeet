@@ -1,0 +1,40 @@
+directory: /app/music/Library
+library: /data/musiclibrary.db
+
+
+import:
+  # Automatically apply changes ONLY for very strong matches
+  timid: no
+  quiet_fallback: asis
+  
+  # Thresholds (these are distance values, lower = better match)
+  strong_rec_thresh: 0.10   
+  medium_rec_thresh: 0.25   # Medium confidence threshold
+  
+  # For low confidence matches, import as-is without applying metadata
+  none_rec_action: asis     # Import as-is, don't apply bad matches
+  medium_rec_action: asis
+  # Additional safety settings
+  incremental: yes
+  quiet: yes
+  
+  # Don't auto-tag poor matches
+  autotag: yes
+  write: yes
+  autotag: yes
+  move: yes
+  copy: no
+  
+match:
+  strong_rec_thresh: 0.10
+  medium_rec_thresh: 0.25
+  rec_gap_thresh: 0.25
+  
+  # Prefer complete albums
+  preferred:
+    countries: ['US', 'GB', 'XW']
+    media: ['Digital Media|File', 'CD']
+
+paths:
+  default: $albumartist/$album/$track $title
+  singleton: $albumartist/$album/$track $title

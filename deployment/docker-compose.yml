@@ -1,0 +1,25 @@
+services:
+  soulbeet:
+    image: soulbeet:local
+    restart: unless-stopped
+    ports:
+      - "9765:9765"
+    env_file:
+      - .env
+    environment:
+      - DATABASE_URL=sqlite:/data/soulbeet.db
+      - SLSKD_URL=http://soulseek:5030
+      - SLSKD_DOWNLOAD_PATH=/app/downloads
+      - BEETS_CONFIG=/app/beets_config.yaml
+    volumes:
+      - ./data:/data
+      - ./configs/beets_config.yaml:/app/beets_config.yaml:ro
+      - /opt/smb-downloads/Music/downloads:/app/downloads
+      - /opt/smb-downloads/Music/Library:/app/library
+    networks:
+      - default
+
+networks:
+  default:
+    external: true
+    name: opt_default
