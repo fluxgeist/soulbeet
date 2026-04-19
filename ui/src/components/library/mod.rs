@@ -118,6 +118,7 @@ pub fn Library() -> Element {
                                                 let entry_for_delete = entry.clone();
                                                 let key = format!("{}/{}", entry.artist, entry.album);
                                                 let is_deleting = deleting.read().as_deref() == Some(&key);
+                                                let track_label = if entry.track_count == 1 { "track" } else { "tracks" };
                                                 rsx! {
                                                     div {
                                                         key: "{key}",
@@ -126,7 +127,7 @@ pub fn Library() -> Element {
                                                             div { class: "min-w-0",
                                                                 span { class: "text-white font-medium block truncate", "{entry.album}" }
                                                                 span { class: "text-gray-500 text-xs font-mono",
-                                                                    "{entry.track_count} track{if entry.track_count == 1 { \"\" } else { \"s\" }}"
+                                                                    "{entry.track_count} {track_label}"
                                                                 }
                                                             }
                                                         }
