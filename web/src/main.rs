@@ -132,9 +132,6 @@ fn WebNavbar() -> Element {
                 Link {
                     class: "nav-link text-white font-medium border-b-2 border-transparent hover:border-beet-accent pb-0.5",
                     active_class: "border-beet-accent",
-                Link {
-                    class: "nav-link text-white font-medium border-b-2 border-transparent hover:border-beet-accent pb-0.5",
-                    active_class: "border-beet-accent",
                     to: Route::LibraryPage {},
                     span { class: "hidden md:block", "Library" }
                     svg {
@@ -150,6 +147,9 @@ fn WebNavbar() -> Element {
                         }
                     }
                 }
+                Link {
+                    class: "nav-link text-white font-medium border-b-2 border-transparent hover:border-beet-accent pb-0.5",
+                    active_class: "border-beet-accent",
                     to: Route::SettingsPage {},
                     span { class: "hidden md:block", "Settings" }
                     svg {
