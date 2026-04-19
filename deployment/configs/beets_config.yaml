@@ -1,12 +1,15 @@
 directory: /app/library
 library: /data/musiclibrary.db
 
-plugins: fetchart
+plugins: fetchart embedart
 
 fetchart:
   auto: yes
   maxwidth: 1000
   sources: coverart itunes amazon
+
+embedart:
+  auto: yes
 
 import:
   timid: no
@@ -26,6 +29,11 @@ match:
   strong_rec_thresh: 0.10
   medium_rec_thresh: 0.25
   rec_gap_thresh: 0.25
+  max_rec:
+    missing_tracks: strong
+    unmatched_tracks: strong
+  distance_weights:
+    missing_tracks: 0.1
   preferred:
     countries: ['US', 'GB', 'XW']
     media: ['Digital Media|File', 'CD']

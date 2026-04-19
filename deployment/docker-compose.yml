@@ -11,6 +11,7 @@ services:
       - SLSKD_URL=http://soulseek:5030
       - SLSKD_DOWNLOAD_PATH=/app/downloads
       - BEETS_CONFIG=/app/beets_config.yaml
+      - BEETS_ALBUM_MODE=true
     volumes:
       - ./data:/data
       - ./configs/beets_config.yaml:/app/beets_config.yaml:ro
