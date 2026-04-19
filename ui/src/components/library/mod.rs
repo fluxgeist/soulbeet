@@ -1,7 +1,6 @@
 use api::{delete_library_album, get_library};
 use dioxus::prelude::*;
 use shared::library::AlbumEntry;
-use std::collections::BTreeMap;
 
 use crate::auth::use_auth;
 
@@ -25,12 +24,14 @@ pub fn Library() -> Element {
     });
 
     // Group albums by artist
-    let grouped: BTreeMap<String, Vec<AlbumEntry>> = {
-        let mut map: BTreeMap<String, Vec<AlbumEntry>> = BTreeMap::new();
+    let grouped: Vec<(String, Vec<AlbumEntry>)> = {
+        let mut map: std::collections::HashMap<String, Vec<AlbumEntry>> = std::collections::HashMap::new();
         for album in albums.read().iter() {
             map.entry(album.artist.clone()).or_default().push(album.clone());
         }
-        map
+        let mut entries: Vec<(String, Vec<AlbumEntry>)> = map.into_iter().collect();
+        entries.sort_by(|(a, _), (b, _)| a.to_lowercase().cmp(&b.to_lowercase()));
+        entries
     };
 
     let handle_delete = move |entry: AlbumEntry| async move {
@@ -106,7 +107,7 @@ pub fn Library() -> Element {
             } else {
                 div { class: "space-y-6",
                     {
-                        grouped.into_iter().map(|(artist, artist_albums)| {
+                        grouped.iter().map(|(artist, artist_albums)| {
                             rsx! {
                                 div { key: "{artist}",
                                     h2 { class: "text-sm font-mono text-gray-400 uppercase tracking-widest mb-2 border-b border-white/5 pb-1",
