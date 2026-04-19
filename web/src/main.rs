@@ -6,7 +6,7 @@ use std::collections::HashMap;
 use websocket::use_resilient_websocket;
 
 use ui::{Downloads, Layout, Navbar, SearchReset};
-use views::{LoginPage, SearchPage, SettingsPage};
+use views::{LoginPage, LibraryPage, SearchPage, SettingsPage};
 
 mod auth;
 mod views;
@@ -22,6 +22,8 @@ pub enum Route {
         #[layout(WebNavbar)]
             #[route("/")]
             SearchPage {},
+            #[route("/library")]
+            LibraryPage {},
             #[route("/settings")]
             SettingsPage {},
 }
@@ -130,6 +132,24 @@ fn WebNavbar() -> Element {
                 Link {
                     class: "nav-link text-white font-medium border-b-2 border-transparent hover:border-beet-accent pb-0.5",
                     active_class: "border-beet-accent",
+                Link {
+                    class: "nav-link text-white font-medium border-b-2 border-transparent hover:border-beet-accent pb-0.5",
+                    active_class: "border-beet-accent",
+                    to: Route::LibraryPage {},
+                    span { class: "hidden md:block", "Library" }
+                    svg {
+                        class: "md:hidden w-6 h-6",
+                        fill: "none",
+                        stroke: "currentColor",
+                        view_box: "0 0 24 24",
+                        path {
+                            stroke_linecap: "round",
+                            stroke_linejoin: "round",
+                            stroke_width: "2",
+                            d: "M9 19V6l12-3v13M9 19c0 1.105-1.343 2-3 2s-3-.895-3-2 1.343-2 3-2 3 .895 3 2zm12-3c0 1.105-1.343 2-3 2s-3-.895-3-2 1.343-2 3-2 3 .895 3 2zM9 10l12-3",
+                        }
+                    }
+                }
                     to: Route::SettingsPage {},
                     span { class: "hidden md:block", "Settings" }
                     svg {

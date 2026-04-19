@@ -26,3 +26,11 @@ pub struct DuplicateReport {
     pub total_duplicate_tracks: usize,
     pub libraries_scanned: Vec<String>,
 }
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AlbumEntry {
+    pub artist: String,
+    pub album: String,
+    pub track_count: usize,
+    pub album_path: String,
+}

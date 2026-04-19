@@ -1,6 +1,7 @@
 pub mod album;
 pub mod cover_art;
 pub mod downloads;
+pub mod library;
 pub mod footer;
 pub mod login;
 pub mod modal;
@@ -12,6 +13,7 @@ pub mod status;
 pub use album::{Album, AlbumHeader};
 pub use cover_art::*;
 pub use downloads::*;
+pub use library::*;
 pub use footer::Footer;
 pub use login::Login;
 pub use modal::*;
