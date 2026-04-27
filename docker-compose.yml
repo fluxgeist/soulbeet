@@ -7,11 +7,10 @@ services:
       - 9765:9765
     environment:
       - DATABASE_URL=sqlite:/data/soulbeet.db
-      - SLSKD_URL=http://slskd:5030
-      - SLSKD_API_KEY=your_slskd_api_key_here
       # This path must match the volume mapping for downloads inside the container
-      - SLSKD_DOWNLOAD_PATH=/downloads
+      - DOWNLOAD_PATH=/downloads
       - SECRET_KEY=a_secret_key # Change this to a secure random key
+      - NAVIDROME_URL=http://localhost:4533 # Your Navidrome server URL
     volumes:
       - soulbeet_data:/data
       # Map the download folder.

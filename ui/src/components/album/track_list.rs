@@ -1,7 +1,7 @@
 use std::collections::HashSet;
 
 use dioxus::prelude::*;
-use shared::musicbrainz::Track;
+use shared::metadata::Track;
 
 use crate::{album::track_item::TrackItem, Checkbox};
 

@@ -1,104 +1,25 @@
 use super::processing;
 use crate::{
     error::{Result, SoulseekError},
+    http::{resolve_docker_url, CircuitBreaker},
     slskd::models::{DownloadRequestFile, SearchResponse},
 };
 use chrono::{DateTime, Duration, Utc};
 use reqwest::{Client, Method, Response};
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use shared::{
-    musicbrainz::{Album, Track},
+    metadata::{Album, Track},
     slskd::{AlbumResult, DownloadResponse, FileEntry, FlattenedFiles, SearchState, TrackResult},
 };
-use std::{
-    collections::HashMap,
-    path::Path,
-    sync::{
-        atomic::{AtomicU64, Ordering},
-        Arc,
-    },
-    time::Duration as StdDuration,
-};
+use std::{collections::HashMap, sync::Arc, time::Duration as StdDuration};
 use tokio::sync::Mutex;
 use tracing::{debug, info, warn};
 use url::Url;
 
 const MAX_SEARCH_RESULTS: usize = 50;
 
-/// HTTP client timeouts
 const HTTP_CONNECT_TIMEOUT_SECS: u64 = 10;
 const HTTP_REQUEST_TIMEOUT_SECS: u64 = 30;
-
-/// Circuit breaker configuration
-const CIRCUIT_BREAKER_FAILURE_THRESHOLD: u64 = 5;
-const CIRCUIT_BREAKER_RESET_TIMEOUT_SECS: u64 = 60;
-
-/// Circuit breaker state for protecting against cascading failures
-#[derive(Debug)]
-pub struct CircuitBreaker {
-    failure_count: AtomicU64,
-    last_failure_time: Mutex<Option<DateTime<Utc>>>,
-    failure_threshold: u64,
-    reset_timeout: Duration,
-}
-
-impl Default for CircuitBreaker {
-    fn default() -> Self {
-        Self {
-            failure_count: AtomicU64::new(0),
-            last_failure_time: Mutex::new(None),
-            failure_threshold: CIRCUIT_BREAKER_FAILURE_THRESHOLD,
-            reset_timeout: Duration::seconds(CIRCUIT_BREAKER_RESET_TIMEOUT_SECS as i64),
-        }
-    }
-}
-
-impl CircuitBreaker {
-    /// Check if the circuit breaker is open (blocking requests)
-    pub async fn is_open(&self) -> bool {
-        let failures = self.failure_count.load(Ordering::Relaxed);
-        if failures < self.failure_threshold {
-            return false;
-        }
-
-        // Check if reset timeout has passed
-        let last_failure = self.last_failure_time.lock().await;
-        if let Some(last_time) = *last_failure {
-            if Utc::now() - last_time > self.reset_timeout {
-                // Reset the circuit breaker
-                drop(last_failure);
-                self.reset().await;
-                return false;
-            }
-        }
-
-        true
-    }
-
-    /// Record a successful request
-    pub fn record_success(&self) {
-        self.failure_count.store(0, Ordering::Relaxed);
-    }
-
-    /// Record a failed request
-    pub async fn record_failure(&self) {
-        self.failure_count.fetch_add(1, Ordering::Relaxed);
-        let mut last_failure = self.last_failure_time.lock().await;
-        *last_failure = Some(Utc::now());
-    }
-
-    /// Reset the circuit breaker
-    pub async fn reset(&self) {
-        self.failure_count.store(0, Ordering::Relaxed);
-        let mut last_failure = self.last_failure_time.lock().await;
-        *last_failure = None;
-    }
-
-    /// Get current failure count
-    pub fn failure_count(&self) -> u64 {
-        self.failure_count.load(Ordering::Relaxed)
-    }
-}
 
 /// Configuration for download batching to avoid overwhelming the slskd API.
 #[derive(Debug, Clone)]
@@ -162,14 +83,7 @@ impl SoulseekClientBuilder {
     }
 
     pub fn base_url(mut self, url: &str) -> Self {
-        let mut resolved_url = url.to_string();
-        if Path::new("/.dockerenv").exists() && resolved_url.contains("localhost") {
-            resolved_url = resolved_url.replace("localhost", "host.docker.internal");
-            info!(
-                "Docker detected, using {} for slskd connection",
-                resolved_url
-            );
-        }
+        let resolved_url = resolve_docker_url(url);
         self.base_url = Some(resolved_url);
         self
     }
@@ -220,61 +134,100 @@ impl SoulseekClientBuilder {
 }
 
 impl SoulseekClient {
-    async fn make_request<T: DeserializeOwned, B: Serialize>(
+    async fn make_request<T: DeserializeOwned, B: Serialize + Clone>(
         &self,
         method: Method,
         endpoint: &str,
         body: Option<B>,
     ) -> Result<T> {
-        // Check circuit breaker before making request
-        if self.circuit_breaker.is_open().await {
-            warn!(
-                "Circuit breaker is open ({} consecutive failures), rejecting request to {}",
-                self.circuit_breaker.failure_count(),
-                endpoint
-            );
-            return Err(SoulseekError::Api {
-                status: 503,
-                message: "Circuit breaker is open - slskd appears to be unavailable".to_string(),
-            });
-        }
+        const MAX_429_RETRIES: u32 = 3;
+        const DEFAULT_RETRY_AFTER_SECS: u64 = 5;
 
-        let url = self.base_url.join(&format!("api/v0/{endpoint}"))?;
-        debug!("Request: {} {}", method, url);
-        let mut request = self.client.request(method, url);
-        if let Some(key) = &self.api_key {
-            request = request.header("X-API-Key", key);
-        }
-        if let Some(b) = body {
-            request = request.json(&b);
-        }
-
-        let response = match request.send().await {
-            Ok(resp) => {
-                self.circuit_breaker.record_success();
-                resp
+        for attempt in 0..=MAX_429_RETRIES {
+            // Check circuit breaker before making request
+            if self.circuit_breaker.is_open().await {
+                warn!(
+                    "Circuit breaker is open ({} consecutive failures), rejecting request to {}",
+                    self.circuit_breaker.failure_count().await,
+                    endpoint
+                );
+                return Err(SoulseekError::Api {
+                    status: 503,
+                    message: "Circuit breaker is open - slskd appears to be unavailable"
+                        .to_string(),
+                });
             }
-            Err(e) => {
-                self.circuit_breaker.record_failure().await;
-                if e.is_timeout() {
-                    warn!("Request to {} timed out", endpoint);
-                    return Err(SoulseekError::Api {
-                        status: 408,
-                        message: format!("Request timed out: {}", e),
-                    });
-                }
-                if e.is_connect() {
-                    warn!("Failed to connect to slskd at {}", endpoint);
-                    return Err(SoulseekError::Api {
-                        status: 503,
-                        message: format!("Connection failed: {}", e),
-                    });
-                }
-                return Err(e.into());
-            }
-        };
 
-        Self::handle_response(response).await
+            let url = self.base_url.join(&format!("api/v0/{endpoint}"))?;
+            debug!("Request: {} {} (attempt {})", method, url, attempt + 1);
+            let mut request = self.client.request(method.clone(), url);
+            if let Some(key) = &self.api_key {
+                request = request.header("X-API-Key", key);
+            }
+            if let Some(ref b) = body {
+                request = request.json(b);
+            }
+
+            let response = match request.send().await {
+                Ok(resp) => {
+                    self.circuit_breaker.record_success().await;
+                    resp
+                }
+                Err(e) => {
+                    self.circuit_breaker.record_failure().await;
+                    if e.is_timeout() {
+                        warn!("Request to {} timed out", endpoint);
+                        return Err(SoulseekError::Api {
+                            status: 408,
+                            message: format!("Request timed out: {}", e),
+                        });
+                    }
+                    if e.is_connect() {
+                        warn!("Failed to connect to slskd at {}", endpoint);
+                        return Err(SoulseekError::Api {
+                            status: 503,
+                            message: format!("Connection failed: {}", e),
+                        });
+                    }
+                    return Err(e.into());
+                }
+            };
+
+            // Handle 429 rate limiting: wait and retry
+            if response.status().as_u16() == 429 {
+                if attempt < MAX_429_RETRIES {
+                    let retry_after = response
+                        .headers()
+                        .get("retry-after")
+                        .and_then(|v| v.to_str().ok())
+                        .and_then(|v| v.parse::<u64>().ok())
+                        .unwrap_or(DEFAULT_RETRY_AFTER_SECS);
+                    warn!(
+                        "Rate limited (429) on {}, waiting {}s before retry {}/{}",
+                        endpoint,
+                        retry_after,
+                        attempt + 1,
+                        MAX_429_RETRIES
+                    );
+                    tokio::time::sleep(StdDuration::from_secs(retry_after)).await;
+                    continue;
+                }
+                // Exhausted 429 retries
+                let text = response.text().await.unwrap_or_default();
+                return Err(SoulseekError::Api {
+                    status: 429,
+                    message: format!("Rate limited after {} retries: {}", MAX_429_RETRIES, text),
+                });
+            }
+
+            return Self::handle_response(response).await;
+        }
+
+        // Unreachable, but required by the compiler
+        Err(SoulseekError::Api {
+            status: 429,
+            message: "Rate limited: max retries exceeded".to_string(),
+        })
     }
 
     async fn handle_response<T: DeserializeOwned>(response: Response) -> Result<T> {
@@ -569,11 +522,26 @@ impl SoulseekClient {
             match self.send_download_batch(username, &batch, batch_idx).await {
                 Ok(responses) => return responses,
                 Err(e) => {
-                    // Log every error, not just the final one
                     warn!(
                         "Batch {} for '{}' attempt {} failed: {}",
                         batch_idx, username, attempt, e
                     );
+                    // Stop retrying for non-retryable errors (e.g. user offline)
+                    if !e.is_retryable() {
+                        warn!(
+                            "Batch {} for '{}': error is non-retryable, stopping",
+                            batch_idx, username
+                        );
+                        return batch
+                            .iter()
+                            .map(|f| DownloadResponse {
+                                username: username.to_string(),
+                                filename: f.filename.clone(),
+                                size: f.size as u64,
+                                error: Some(e.to_string()),
+                            })
+                            .collect();
+                    }
                     last_error = Some(e);
                 }
             }
@@ -653,6 +621,14 @@ impl SoulseekClient {
                     .collect());
             }
 
+            // User offline: 404 with "offline" in body -- non-retryable
+            if status.as_u16() == 404 && resp_text.to_lowercase().contains("offline") {
+                warn!("User '{}' is offline, not retrying", username);
+                return Err(SoulseekError::UserOffline {
+                    username: username.to_string(),
+                });
+            }
+
             return Err(SoulseekError::Api {
                 status: status.as_u16(),
                 message: resp_text,
@@ -670,7 +646,11 @@ impl SoulseekClient {
     ) -> Vec<DownloadResponse> {
         // Log the raw response for debugging (truncate if too long)
         let log_text = if resp_text.len() > 500 {
-            format!("{}... (truncated, {} bytes total)", &resp_text[..500], resp_text.len())
+            format!(
+                "{}... (truncated, {} bytes total)",
+                &resp_text[..500],
+                resp_text.len()
+            )
         } else {
             resp_text.to_string()
         };
@@ -748,7 +728,8 @@ impl SoulseekClient {
             // Not valid JSON - check for known text responses
             let lower = resp_text.to_lowercase();
 
-            if lower.contains("already") && (lower.contains("queue") || lower.contains("progress")) {
+            if lower.contains("already") && (lower.contains("queue") || lower.contains("progress"))
+            {
                 info!("slskd reports files already queued (text response)");
                 return all_success();
             }
@@ -777,7 +758,9 @@ impl SoulseekClient {
 
                 info!(
                     "slskd count response: {} enqueued, {} failed (batch: {} files)",
-                    enqueued, failed, batch.len()
+                    enqueued,
+                    failed,
+                    batch.len()
                 );
 
                 // Validate the counts make sense
@@ -798,15 +781,35 @@ impl SoulseekClient {
                     return all_error("All files failed to enqueue");
                 }
 
-                // Partial success - we can't know which files failed without detailed response
-                // Mark all as success but log the partial failure
+                // Partial success -- mark enqueued files as success, remaining as failed.
+                // We cannot determine which specific files failed from a count-only response,
+                // so we mark the first `enqueued` files as success and the rest as failed.
                 if enqueued > 0 && failed > 0 {
                     warn!(
-                        "Partial enqueue: {} succeeded, {} failed. Cannot determine which files failed.",
-                        enqueued, failed
+                        "Partial enqueue: {} succeeded, {} failed out of {} files. \
+                         Cannot determine which specific files failed from count-based response.",
+                        enqueued,
+                        failed,
+                        batch.len()
                     );
-                    // Return success for all since we can't distinguish
-                    return all_success();
+                    let mut results = Vec::with_capacity(batch.len());
+                    for (i, f) in batch.iter().enumerate() {
+                        results.push(DownloadResponse {
+                            username: username.to_string(),
+                            filename: f.filename.clone(),
+                            size: f.size as u64,
+                            error: if i < enqueued {
+                                None
+                            } else {
+                                Some(format!(
+                                    "Enqueue failed (count-based response: {} of {} failed)",
+                                    failed,
+                                    batch.len()
+                                ))
+                            },
+                        });
+                    }
+                    return results;
                 }
 
                 // Some were enqueued
@@ -946,9 +949,128 @@ impl SoulseekClient {
         }
     }
 
-    pub async fn check_connection(&self) -> bool {
-        self.make_request::<serde_json::Value, ()>(Method::GET, "session", None)
+    /// Check both slskd connectivity and Soulseek network connection.
+    ///
+    /// Returns Ok(()) if slskd is reachable and connected to Soulseek.
+    /// Returns Err with a descriptive message if either check fails.
+    pub async fn check_connection(&self) -> std::result::Result<(), String> {
+        // First verify slskd is reachable (session endpoint)
+        if self
+            .make_request::<serde_json::Value, ()>(Method::GET, "session", None)
             .await
-            .is_ok()
+            .is_err()
+        {
+            return Err("Cannot reach slskd (session endpoint failed)".to_string());
+        }
+
+        // Then verify Soulseek network connection via application state
+        #[derive(Deserialize)]
+        struct ServerState {
+            #[serde(rename = "isConnected")]
+            is_connected: bool,
+            #[serde(rename = "isLoggedIn")]
+            is_logged_in: bool,
+        }
+
+        #[derive(Deserialize)]
+        struct AppState {
+            server: ServerState,
+        }
+
+        match self
+            .make_request::<AppState, ()>(Method::GET, "application", None)
+            .await
+        {
+            Ok(app_state) => {
+                if !app_state.server.is_connected {
+                    return Err(
+                        "slskd is running but not connected to the Soulseek network. \
+                         Check slskd's connection settings or restart slskd."
+                            .to_string(),
+                    );
+                }
+                if !app_state.server.is_logged_in {
+                    return Err("slskd is connected to Soulseek but not logged in. \
+                         Check slskd's Soulseek username and password."
+                        .to_string());
+                }
+                Ok(())
+            }
+            Err(e) => {
+                warn!("Failed to check slskd application state: {}", e);
+                // If we can reach the session endpoint but not the application endpoint,
+                // slskd is reachable but something is off. Return Ok since the basic
+                // connectivity is there -- avoids false negatives on older slskd versions.
+                Ok(())
+            }
+        }
+    }
+}
+
+#[async_trait::async_trait]
+impl crate::DownloadBackend for SoulseekClient {
+    fn id(&self) -> &'static str {
+        "soulseek"
+    }
+
+    fn name(&self) -> &'static str {
+        "Soulseek"
+    }
+
+    async fn start_search(&self, album: Option<&Album>, tracks: &[Track]) -> Result<String> {
+        let timeout = Duration::seconds(120);
+        self.start_search(album.cloned(), tracks.to_vec(), timeout)
+            .await
+    }
+
+    async fn poll_search(&self, search_id: &str) -> Result<shared::download::SearchResult> {
+        let (results, has_more, state) = self.poll_search(search_id.to_string()).await?;
+        Ok(shared::download::SearchResult {
+            search_id: search_id.to_string(),
+            groups: results.into_iter().map(Into::into).collect(),
+            has_more,
+            state: state.into(),
+        })
+    }
+
+    async fn download(
+        &self,
+        items: Vec<shared::download::DownloadableItem>,
+    ) -> Result<Vec<shared::download::QueuedDownload>> {
+        let tracks: Vec<TrackResult> = items
+            .into_iter()
+            .filter_map(|item| item.to_slskd_track())
+            .collect();
+
+        let responses = self.download(tracks).await?;
+        Ok(responses.into_iter().map(Into::into).collect())
+    }
+
+    async fn get_downloads(&self) -> Result<Vec<shared::download::DownloadProgress>> {
+        let entries = self.get_all_downloads().await?;
+        Ok(entries.into_iter().map(Into::into).collect())
+    }
+
+    async fn cancel_download(
+        &self,
+        username: &str,
+        download_id: &str,
+        remove: bool,
+    ) -> Result<()> {
+        self.cancel_download(username, download_id, remove).await
+    }
+
+    async fn clear_completed_downloads(&self) -> Result<()> {
+        self.clear_all_completed_downloads().await
+    }
+
+    async fn health_check(&self) -> bool {
+        match self.check_connection().await {
+            Ok(()) => true,
+            Err(msg) => {
+                warn!("Health check failed: {}", msg);
+                false
+            }
+        }
     }
 }

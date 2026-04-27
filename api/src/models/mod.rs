@@ -1,2 +1,10 @@
+pub mod app_config;
+pub mod deletion_review;
+pub mod discovery_candidate;
+pub mod discovery_history;
+pub mod discovery_playlist;
+pub mod engine_report;
 pub mod folder;
 pub mod user;
+pub mod user_profile;
+pub mod user_settings;

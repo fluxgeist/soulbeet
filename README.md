@@ -1,30 +1,33 @@
 # Soulbeet
 
-[![Docker Pulls](https://img.shields.io/docker/pulls/docccccc/soulbeet)](https://hub.docker.com/repository/docker/docccccc/soulbeet/general)
-[![Docker Image Size](https://img.shields.io/docker/image-size/docccccc/soulbeet)](https://hub.docker.com/repository/docker/docccccc/soulbeet/general)
-[![Docker Image Version](https://img.shields.io/docker/v/docccccc/soulbeet)](https://hub.docker.com/repository/docker/docccccc/soulbeet/general)
+[![Docker Pulls](https://img.shields.io/docker/pulls/docccccc/soulbeet)](https://hub.docker.com/r/docccccc/soulbeet)
+[![Docker Image Size](https://img.shields.io/docker/image-size/docccccc/soulbeet)](https://hub.docker.com/r/docccccc/soulbeet/tags)
+[![Docker Image Version](https://img.shields.io/docker/v/docccccc/soulbeet)](https://hub.docker.com/r/docccccc/soulbeet/tags)
 
 [![GitHub Actions Workflow Status](https://img.shields.io/github/actions/workflow/status/terry90/soulbeet/image-build-push.yml)](https://github.com/terry90/soulbeet/actions)
 [![GitHub License](https://img.shields.io/github/license/terry90/soulbeet)](https://github.com/terry90/soulbeet)
 [![GitHub Repo stars](https://img.shields.io/github/stars/terry90/soulbeet)](https://github.com/terry90/soulbeet)
 
-Soulbeet is a modern, self-hosted music downloader and manager. It bridges the gap between Soulseek (via `slskd`) and your music library (managed by `beets`), providing a seamless flow from search to streaming-ready library.
+Soulbeet is a self-hosted music downloader, library manager, and discovery engine. Search for music, download it, and let the app handle everything else: finding the best source, tagging, organizing, and keeping your library clean. Connect your scrobble history and Soulbeet will find new music for you automatically.
 
 Screenshots: [here](./screenshots)
 
 ## Features
 
--   **Unified Search**: Search for albums and tracks using MusicBrainz metadata and find sources on Soulseek.
--   **One-Click Download & Import**: Select an album (or just some tracks), choose your target folder, and Soulbeet handles the rest.
--   **Automated Importing**: Automatically monitors downloads and uses the `beets` CLI to tag, organize, and move files to your specified music folder.
--   **User Management**: Multi-user support with private folders. Each user can manage their own music library paths. Or have a common folder.
+- **Search & Download**: Find albums and tracks, hit download. Soulbeet picks the best available source from Soulseek, downloads it, tags it with beets, and puts it in your library. No manual file management.
+- **Music Discovery**: Soulbeet analyzes your Last.fm and ListenBrainz history, finds new music through track similarity, artist exploration, collaborative filtering, and genre discovery, downloads the best candidates, and pushes playlists to your Navidrome server. Fully automatic.
+- **Three Discovery Profiles**: Conservative (close to what you know), Balanced, or Adventurous (unfamiliar territory). Run one or all three, each with its own playlist.
+- **Rate & Keep**: Listen in Navidrome. 3+ stars promotes a track to your permanent library, 1 star deletes it. Unrated tracks expire and get replaced with fresh picks.
+- **Multi-user**: Private or shared folders. Each user gets their own discovery profiles, scrobble credentials, and preferences.
+- **Multiple Metadata Providers**: MusicBrainz (albums) or Last.fm (single tracks), selectable per user.
 
-## Architecture
+## How It Works
 
-1.  **Soulbeet Web**: The main interface (Dioxus Fullstack).
-2.  **Slskd**: The Soulseek client backend. Soulbeet communicates with `slskd` to initiate and monitor downloads.
-3.  **Beets**: The music library manager. Soulbeet executes `beet import` to process finished downloads.
-4.  **SQLite**: Stores user accounts and folder configurations. (PostgreSQL compat can be added easily, maybe in the future)
+You search, you click download. Behind the scenes:
+
+1. **Soulbeet** finds the best source on Soulseek, downloads it through **slskd**, tags and organizes it with **beets**, and puts it in your library.
+2. **Navidrome** picks up the new files and makes them streamable.
+3. For discovery: **Last.fm / ListenBrainz** feed your listening history into the recommendation engine, which finds new tracks, downloads them, and pushes playlists to Navidrome.
 
 ## Self-Hosting with Docker
 
@@ -49,27 +52,29 @@ services:
       - 9765:9765
     environment:
       - DATABASE_URL=sqlite:/data/soulbeet.db
-      - SLSKD_URL=http://slskd:5030
-      # This part is important, get your API from slskd config file or add one: https://github.com/slskd/slskd/blob/master/docs/config.md#yaml-24
-      - SLSKD_API_KEY=your_slskd_api_key_here
-      # The path where slskd saves files (INSIDE the soulbeet container)
-      - SLSKD_DOWNLOAD_PATH=/downloads
-      # Optional: Beets configuration
+      - DOWNLOAD_PATH=/downloads
+      - SECRET_KEY=change-me-in-production
+      - NAVIDROME_URL=http://navidrome:4533
+      # Optional
       - BEETS_CONFIG=/config/config.yaml
-      - SECRET_KEY=secret
     volumes:
-      # Data persistence (DB)
       - ./data:/data
-      # Map the SAME download folder slskd uses
       - /path/to/slskd/downloads:/downloads
-      # Map your music libraries (where beets will move files to)
       - /path/to/music:/music
-    # Optional
     depends_on:
       - slskd
+      - navidrome
 
-  # Optional
-  # Example slskd service if you don't have one running
+  navidrome:
+    image: deluan/navidrome:latest
+    ports:
+      - "4533:4533"
+    environment:
+      - ND_MUSICFOLDER=/music
+    volumes:
+      - ./navidrome-data:/data
+      - /path/to/music:/music
+
   slskd:
     image: slskd/slskd
     environment:
@@ -81,23 +86,22 @@ services:
       - "5030:5030"
 ```
 
-2.  **Important**: The `/downloads` volume must match between `slskd` and `soulbeet` so Soulbeet can see the files `slskd` downloaded.
+2.  **Important**: The `/downloads` volume must match between `slskd` and `soulbeet` so Soulbeet can see the files `slskd` downloaded. The `/music` volume must match between `soulbeet` and `navidrome` so Navidrome can see the organized library.
 
-3.  Build and Run:
+3.  Run:
 
 ```bash
-docker-compose up -d --build
+docker-compose up -d
 ```
 
 ### Initial Setup
 
-1.  Open `http://localhost:9765`
-2.  Login with the default credentials:
-    -   Username: `admin`
-    -   Password: `admin`
-3.  Go to **Settings**.
-4.  **Change your password** (Create a new user if you prefer and delete the admin later, or just change the admin logic if you forked the code).
-5.  **Add Music Folders**: Add the paths where you want your music to be stored (e.g., `/music/Person1`, `/music/Person2`,  `/music/Shared`). These must be paths accessible inside the Docker container.
+1.  Open `http://localhost:9765` and log in with your **Navidrome credentials**.
+2.  In **Settings > Config**, connect slskd (URL + API key). [How to get an slskd API key](https://github.com/slskd/slskd/blob/master/docs/config.md#yaml-24).
+3.  In **Settings > Library**, add your music folders (e.g. `/music`).
+4.  That's it. Search for something and download it.
+
+For discovery (optional): add your Last.fm API key and/or ListenBrainz token in Settings > Library, enable discovery on a folder, pick your profiles, and hit Generate.
 
 ## Configuration
 
@@ -106,12 +110,13 @@ docker-compose up -d --build
 | Variable | Description | Default |
 |----------|-------------|---------|
 | `DATABASE_URL` | Connection string for SQLite | `sqlite:soulbeet.db` |
-| `SLSKD_URL` | URL of your Slskd instance | |
-| `SLSKD_API_KEY` | API Key for Slskd | |
-| `SLSKD_DOWNLOAD_PATH` | Path where Slskd downloads files | |
+| `DOWNLOAD_PATH` | Path where slskd saves downloads | `/downloads` |
+| `SECRET_KEY` | Encryption key for tokens and credentials | |
+| `NAVIDROME_URL` | Your Navidrome server URL | |
 | `BEETS_CONFIG` | Path to custom beets config file | `beets_config.yaml` |
 | `BEETS_ALBUM_MODE` | Enable album import mode (see below) | `false` |
-| `SECRET_KEY` | Used to encrypt tokens | |
+
+**Note**: slskd URL and API key are configured through the web UI (Settings > Config) and stored in the database. Scrobble credentials (Last.fm API key, ListenBrainz token) are configured per-user in Settings > Library.
 
 ### Beets Configuration
 
@@ -133,9 +138,9 @@ Default `beet import` flags used:
 
 #### Interacting with Your Library
 
-In soulbeet each user can have multiple libraries. Each library is a folder that contains music files and a `.beets_library.db` file. This database is used to avoid duplicate tracks within the same library.
+Each user can have multiple libraries. Each library is a folder that contains music files and a `.beets_library.db` file. This database is used to avoid duplicate tracks within the same library.
 
-Since we use different databases, we can't directly compare tracks across libraries. However, we can use the `beets` CLI to interact with each library individually. This way you can add tracks outside of soulbeet but keep them in sync with your library.
+Since we use different databases, we can't directly compare tracks across libraries. However, we can use the `beets` CLI to interact with each library individually. This way you can add tracks outside of Soulbeet but keep them in sync with your library.
 
 To manually interact with a library (list tracks, modify tags, remove items, etc.), use the `beet` CLI with the `-l` flag pointing to the folder's database:
 
@@ -179,6 +184,35 @@ match:
 
 *Note: Tweaking `strong_rec_thresh` and other matching parameters increases the risk of incorrect tags, but is necessary for fully automated imports of obscure or partial albums.*
 
+### Discovery Setup
+
+Discovery generates personalized playlists from your scrobble history and pushes them to Navidrome. Here's how to set it up.
+
+#### Navidrome Configuration
+
+1. **Enable ReportRealPath** for the Soulbeet player. Go to your Navidrome instance > Settings > Players (e.g. `https://your-navidrome/app/#/player`), find the Soulbeet player entry, and enable "Report Real Path". Without this, rating sync and auto-delete cannot resolve file paths.
+
+2. Your Soulbeet folder paths must point to the same physical directories that Navidrome's music library uses. The mount paths inside each container can differ (e.g. Soulbeet at `/music`, Navidrome at `/media/music`), as long as they map to the same files on the host.
+
+#### Soulbeet Configuration
+
+1. Go to **Settings > Library** in the Soulbeet web UI
+2. Add your **Last.fm API key** and/or **ListenBrainz username + token**
+3. **Enable Discovery** on a folder and pick your profiles (Conservative, Balanced, Adventurous)
+4. Optionally customize playlist names for each profile
+5. Hit **Generate** to run the first batch
+
+#### How It Works
+
+- Discovery creates a `Discovery/` directory inside your chosen folder, with subdirectories per profile (e.g., `Discovery/Balanced/`, `Discovery/Adventurous/`).
+- Tracks are downloaded from Soulseek, imported via beets into the profile subdirectory, and tagged properly.
+- A smart playlist is created in Navidrome (via the native API) for each profile, filtered by the folder path. The playlist auto-updates as Navidrome scans new files.
+- Every 6 hours, an automation task syncs ratings, creates playlists if missing, and regenerates expired discovery batches.
+
+#### Auto-Delete
+
+When enabled (Settings > Library > Auto-delete), 1-star tracks are deleted from disk during rating sync. This requires ReportRealPath to be enabled in Navidrome so Soulbeet receives the actual file path. For shared folders (multiple users), a track is only deleted if the average rating across all users is 1 or below.
+
 ## Development
 
 1.  Install Rust and `dioxus_cli`.
@@ -189,17 +223,10 @@ match:
 3.  Run the app:
     ```bash
     dx serve --platform web
+    ```
 
-## TODO & Ideas
+## Roadmap
 
-- Mobile app (nothing much to do honestly)
-- Better scoring
-- Enhance the default beets configuration
-- Find a way to avoid album dups ? e.g `Clair Obscur_ Expedition 33 (Original Soundtrack)` & `Clair Obscur_ Expedition 33_ Original Soundtrack` - Rare but annoying
-- Add play preview on album track list
-- Improve slskd search. Currently:
-  - Single track search, query: "{artist} {track_title}" -> more resilient
-  - Multiple tracks search, query: "{artist} {album}" -> best for metadata and grouping tracks by album
-- Listenbrainz integration to autodownload suggestions
-- Complete library manager, removal of tracks
-- Synchronize a playlist (Spotify or other)
+- Reduce friction: fewer clicks between "I want this" and "it's in my library"
+- Play preview on album track list before downloading
+- Smarter Soulseek search (better source ranking, automatic fallback between providers)

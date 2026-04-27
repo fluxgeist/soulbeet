@@ -7,7 +7,7 @@ use musicbrainz_rs::{
     },
     Fetch, MusicBrainzClient, Search,
 };
-use shared::musicbrainz::{Album, AlbumWithTracks, SearchResult, Track};
+use shared::metadata::{Album, AlbumWithTracks, SearchResult, Track};
 use std::{collections::HashSet, future::Future, sync::OnceLock, time::Duration};
 use tokio::time::sleep;
 use tracing::{info, warn};
@@ -97,7 +97,10 @@ fn is_retryable_error(error: &musicbrainz_rs::Error) -> bool {
 /// Retries an async operation with exponential backoff and request timeout.
 /// Only retries transient errors (network issues, timeouts, 5xx responses).
 /// Does NOT retry client errors (4xx) or permanent failures.
-async fn with_retry<T, F, Fut>(operation_name: &str, mut operation: F) -> Result<T, musicbrainz_rs::Error>
+async fn with_retry<T, F, Fut>(
+    operation_name: &str,
+    mut operation: F,
+) -> Result<T, musicbrainz_rs::Error>
 where
     F: FnMut() -> Fut,
     Fut: Future<Output = Result<T, musicbrainz_rs::Error>>,
@@ -105,11 +108,12 @@ where
     let mut last_error = None;
 
     for attempt in 0..MAX_RETRIES {
+        // Respect MusicBrainz rate limit (1 req/sec)
+        crate::http::mb_rate_limit().await;
+
         // Apply timeout to each request
-        let result = tokio::time::timeout(
-            Duration::from_secs(REQUEST_TIMEOUT_SECS),
-            operation()
-        ).await;
+        let result =
+            tokio::time::timeout(Duration::from_secs(REQUEST_TIMEOUT_SECS), operation()).await;
 
         match result {
             Ok(Ok(value)) => return Ok(value),
@@ -125,10 +129,7 @@ where
 
                 last_error = Some(e);
                 if attempt < MAX_RETRIES - 1 {
-                    let delay = std::cmp::min(
-                        BASE_DELAY_MS * 2u64.pow(attempt),
-                        MAX_BACKOFF_MS
-                    );
+                    let delay = std::cmp::min(BASE_DELAY_MS * 2u64.pow(attempt), MAX_BACKOFF_MS);
                     warn!(
                         "{} failed (attempt {}/{}), retrying in {}ms: {:?}",
                         operation_name,
@@ -149,31 +150,18 @@ where
                     attempt + 1,
                     MAX_RETRIES
                 );
-                // Create a timeout error - we'll retry
+                last_error = Some(musicbrainz_rs::Error::MaxRetriesExceeded);
                 if attempt < MAX_RETRIES - 1 {
-                    let delay = std::cmp::min(
-                        BASE_DELAY_MS * 2u64.pow(attempt),
-                        MAX_BACKOFF_MS
-                    );
+                    let delay = std::cmp::min(BASE_DELAY_MS * 2u64.pow(attempt), MAX_BACKOFF_MS);
                     sleep(Duration::from_millis(delay)).await;
                 }
             }
         }
     }
 
-    // Return the last error or panic (should never happen since we always set last_error on timeout)
-    // If we somehow have no error, create a synthetic one
     match last_error {
         Some(e) => Err(e),
-        None => {
-            warn!(
-                "{} failed after {} retries with no recorded error (likely all timeouts)",
-                operation_name, MAX_RETRIES
-            );
-            // Re-run the operation one more time to get an error to return
-            // This is a fallback - shouldn't normally happen
-            operation().await
-        }
+        None => Err(musicbrainz_rs::Error::MaxRetriesExceeded),
     }
 }
 
@@ -211,15 +199,26 @@ pub async fn search(
                     Recording::search(search_query)
                         .limit(limit)
                         .with_releases()
+                        .with_ratings()
                         .execute_with_client(client)
                         .await
                 }
             })
             .await?;
 
+            // Sort by rating (descending) - higher rated recordings first
+            let mut recordings: Vec<_> = search_results.entities;
+            recordings.sort_by(|a, b| {
+                let a_rating = a.rating.as_ref().and_then(|r| r.value).unwrap_or(0.0);
+                let b_rating = b.rating.as_ref().and_then(|r| r.value).unwrap_or(0.0);
+                b_rating
+                    .partial_cmp(&a_rating)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            });
+
             let mut unique_tracks = HashSet::new();
 
-            for recording in search_results.entities {
+            for recording in recordings {
                 let artist_name = format_artist_credit(&recording.artist_credit);
                 let album_title = recording
                     .releases
@@ -238,13 +237,15 @@ pub async fn search(
                 if !unique_tracks.contains(&key) {
                     let first_release = recording.releases.as_ref().and_then(|r| r.first());
                     let track = Track {
-                        id: recording.id,
+                        id: recording.id.clone(),
                         title: recording.title.clone(),
                         artist: artist_name.clone(),
                         album_id: first_release.map(|release| release.id.clone()),
                         album_title: first_release.map(|r| r.title.clone()),
                         release_date: first_release.and_then(|r| r.date.clone().map(|d| d.0)),
                         duration: format_duration(&recording.length),
+                        mbid: Some(recording.id.clone()),
+                        release_mbid: first_release.map(|r| r.id.clone()),
                     };
                     unique_tracks.insert(key);
                     results.push(SearchResult::Track(track));
@@ -262,13 +263,24 @@ pub async fn search(
                     ReleaseGroup::search(search_query)
                         .limit(limit)
                         .with_releases()
+                        .with_ratings()
                         .execute_with_client(client)
                         .await
                 }
             })
             .await?;
 
-            for release_group in search_results.entities {
+            // Sort by rating (descending) - higher rated albums first
+            let mut release_groups: Vec<_> = search_results.entities;
+            release_groups.sort_by(|a, b| {
+                let a_rating = a.rating.as_ref().and_then(|r| r.value).unwrap_or(0.0);
+                let b_rating = b.rating.as_ref().and_then(|r| r.value).unwrap_or(0.0);
+                b_rating
+                    .partial_cmp(&a_rating)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            });
+
+            for release_group in release_groups {
                 if release_group.primary_type != Some(ReleaseGroupPrimaryType::Album)
                     && release_group.primary_type != Some(ReleaseGroupPrimaryType::Ep)
                 {
@@ -289,6 +301,8 @@ pub async fn search(
                         title: release_group.title.clone(),
                         artist: format_artist_credit(&release_group.artist_credit),
                         release_date: final_release.date.as_ref().map(|d| d.0.clone()),
+                        mbid: Some(final_release.id.clone()),
+                        cover_url: None,
                     }));
                 }
             }
@@ -329,6 +343,8 @@ pub async fn find_album(release_id: &str) -> Result<AlbumWithTracks, musicbrainz
                             album_title: Some(release.title.clone()),
                             release_date: release.date.as_ref().map(|d| d.0.clone()),
                             duration: format_duration(&recording.length),
+                            mbid: Some(recording.id.clone()),
+                            release_mbid: Some(release.id.clone()),
                         });
                     }
                 }
@@ -338,14 +354,79 @@ pub async fn find_album(release_id: &str) -> Result<AlbumWithTracks, musicbrainz
 
     // First, create the standalone Album object.
     let album = Album {
-        id: release.id,
+        id: release.id.clone(),
         title: release.title,
         artist: format_artist_credit(&release.artist_credit),
         release_date: release.date.map(|d| d.0),
+        mbid: Some(release.id),
+        cover_url: None,
     };
 
-    // Then, package it into the new struct along with the tracks.
     let album_with_tracks = AlbumWithTracks { album, tracks };
 
     Ok(album_with_tracks)
+}
+
+pub struct MusicBrainzProvider;
+
+impl MusicBrainzProvider {
+    pub fn new() -> Self {
+        Self
+    }
+}
+
+impl Default for MusicBrainzProvider {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+#[async_trait::async_trait]
+impl crate::MetadataProvider for MusicBrainzProvider {
+    fn id(&self) -> &'static str {
+        "musicbrainz"
+    }
+
+    fn name(&self) -> &'static str {
+        "MusicBrainz"
+    }
+
+    async fn search_albums(
+        &self,
+        artist: Option<&str>,
+        query: &str,
+        limit: usize,
+    ) -> crate::error::Result<Vec<SearchResult>> {
+        let artist_opt = artist.map(String::from);
+        search(&artist_opt, query, SearchType::Album, limit.min(100) as u8)
+            .await
+            .map_err(|e| crate::error::SoulseekError::Api {
+                status: 500,
+                message: e.to_string(),
+            })
+    }
+
+    async fn search_tracks(
+        &self,
+        artist: Option<&str>,
+        query: &str,
+        limit: usize,
+    ) -> crate::error::Result<Vec<SearchResult>> {
+        let artist_opt = artist.map(String::from);
+        search(&artist_opt, query, SearchType::Track, limit.min(100) as u8)
+            .await
+            .map_err(|e| crate::error::SoulseekError::Api {
+                status: 500,
+                message: e.to_string(),
+            })
+    }
+
+    async fn get_album(&self, id: &str) -> crate::error::Result<AlbumWithTracks> {
+        find_album(id)
+            .await
+            .map_err(|e| crate::error::SoulseekError::Api {
+                status: 500,
+                message: e.to_string(),
+            })
+    }
 }

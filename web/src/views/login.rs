@@ -13,13 +13,13 @@ pub fn LoginPage() -> Element {
     let navigator = use_navigator();
     let mut auth = use_auth();
 
-    let login = use_callback(move |(username, password): (String, String)| 
-        -> Pin<Box<dyn Future<Output = Result<(), String>>>> 
+    let login = use_callback(move |(username, password): (String, String)|
+        -> Pin<Box<dyn Future<Output = Result<(), String>>>>
     {
         Box::pin(async move {
             match login(username, password).await {
                 Ok(response) => {
-                    auth.login(response); 
+                    auth.login(response);
                     navigator.push(Route::SearchPage {});
                     Ok(())
                 }
@@ -27,7 +27,6 @@ pub fn LoginPage() -> Element {
             }
         })
     });
-
 
     rsx! {
         Login { login }

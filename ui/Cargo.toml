@@ -1,16 +1,18 @@
 [package]
 name = "ui"
-version = "0.2.5"
+version = "0.5.2"
 edition = "2021"
 
 [dependencies]
 dioxus = { workspace = true, features = ["fullstack"] }
 api = { workspace = true }
 shared = { workspace = true }
-web-sys = { version = "0.3.83", features = ["Storage", "Window", "Location"] }
-serde_json = "1.0.145"
-futures = "0.3.31"
+web-sys = { version = "0.3.91", features = ["Storage", "Window", "Location"] }
+serde_json = "1.0.149"
+futures = "0.3.32"
 gloo-timers = { version = "0.3.0", features = ["futures"] }
+wasm-bindgen = "0.2"
+chrono = { version = "0.4", features = ["serde"] }
 
 [features]
 default = []

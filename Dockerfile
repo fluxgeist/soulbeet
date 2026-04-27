@@ -1,15 +1,17 @@
 # Build Stage
 FROM rust:1.91-bookworm AS builder
 
-# Install build dependencies
+# Install build dependencies + Node 22 (distro Node 18 is too old for Tailwind v4 oxide)
 RUN apt-get update && apt-get install -y \
   pkg-config \
   libssl-dev \
-  nodejs \
-  npm
+  curl \
+  && curl -fsSL https://deb.nodesource.com/setup_22.x | bash - \
+  && apt-get install -y nodejs \
+  && rm -rf /var/lib/apt/lists/*
 
-# Install Dioxus CLI (must match dioxus 0.7.2 in Cargo.toml)
-RUN cargo install dioxus-cli --version 0.7.2 --locked
+# Install Dioxus CLI (must match dioxus 0.7.4 in Cargo.toml)
+RUN cargo install dioxus-cli --version 0.7.4 --locked
 
 # Create app directory
 WORKDIR /app
@@ -27,8 +29,8 @@ COPY lib/soulbeet/Cargo.toml lib/soulbeet/
 # Copy source code
 COPY . .
 
-# Install Tailwind dependencies (force linux-arm64 native binding)
-RUN npm install && npm install @tailwindcss/oxide-linux-arm64-gnu
+# Install Tailwind dependencies (clean install to avoid npm optional dep bug on arm64)
+RUN rm -rf node_modules package-lock.json && npm install
 
 # Build the Tailwind CSS
 RUN npx @tailwindcss/cli -i ./web/assets/input.css -o ./web/assets/tailwind.css
@@ -70,7 +72,7 @@ COPY --from=beets-builder /opt/venv /opt/venv
 WORKDIR /app
 
 # Copy artifacts from builder
-COPY --from=builder /app/target/dx/web/release/web /app/server
+COPY --from=builder /app/target/dx/web/release/server /app/server
 
 
 # Copy empty data directory to ensure /data exists
@@ -87,4 +89,4 @@ ENV IP=0.0.0.0
 # Expose the port
 EXPOSE 9765
 
-ENTRYPOINT ["/app/server/web"]
+ENTRYPOINT ["/app/server/server"]

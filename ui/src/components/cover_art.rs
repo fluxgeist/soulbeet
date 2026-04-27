@@ -1,23 +1,28 @@
 use dioxus::prelude::*;
+use shared::metadata::Album;
 
-#[derive(Props, PartialEq, Clone)]
-pub struct CoverArtProps {
-    /// The source URL for the image.
-    pub src: String,
-    /// The alt text for accessibility.
-    pub alt: String,
+fn get_album_cover_url(album: &Album) -> Option<String> {
+    if let Some(url) = &album.cover_url {
+        return Some(url.clone());
+    }
+    album
+        .mbid
+        .as_ref()
+        .map(|mbid| format!("https://coverartarchive.org/release/{}/front-250", mbid))
 }
 
 #[component]
-pub fn CoverArt(props: CoverArtProps) -> Element {
+pub fn CoverArt(album: Album) -> Element {
     let mut has_error = use_signal(|| false);
+    let cover_url = get_album_cover_url(&album);
+    let alt = format!("Cover for {}", album.title);
 
     rsx! {
       div { class: "w-20 h-20 flex-shrink-0 bg-beet-panel border border-white/5 rounded-md flex items-center justify-center overflow-hidden",
-        if !has_error() {
+        if let Some(url) = cover_url.filter(|_| !has_error()) {
           img {
-            src: "{props.src}",
-            alt: "{props.alt}",
+            src: "{url}",
+            alt: "{alt}",
             class: "w-full h-full object-cover",
             onerror: move |_| has_error.set(true),
           }

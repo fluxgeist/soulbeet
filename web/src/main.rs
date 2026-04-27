@@ -1,15 +1,22 @@
 use auth::{use_auth, AuthProvider};
-use dioxus::fullstack::WebSocketOptions;
 use dioxus::prelude::*;
-use shared::slskd::FileEntry;
+use shared::download::DownloadProgress;
+#[cfg(feature = "web")]
+use shared::download::DownloadEvent;
+use shared::system::NavidromeStatus;
 use std::collections::HashMap;
+
+#[cfg(feature = "web")]
+use dioxus::fullstack::WebSocketOptions;
+#[cfg(feature = "web")]
 use websocket::use_resilient_websocket;
 
-use ui::{Downloads, Layout, Navbar, SearchReset};
-use views::{LoginPage, LibraryPage, SearchPage, SettingsPage};
+use ui::{AutoDownloadSignal, Downloads, Layout, Navbar, SearchPrefill, SearchReset, SettingsProvider};
+use views::{DashboardPage, LoginPage, LibraryPage, SearchPage, SettingsPage};
 
 mod auth;
 mod views;
+#[cfg(feature = "web")]
 mod websocket;
 
 #[derive(Debug, Clone, Routable, PartialEq)]
@@ -22,6 +29,8 @@ pub enum Route {
         #[layout(WebNavbar)]
             #[route("/")]
             SearchPage {},
+            #[route("/dashboard")]
+            DashboardPage {},
             #[route("/library")]
             LibraryPage {},
             #[route("/settings")]
@@ -37,6 +46,9 @@ fn main() {
         use tower_cookies::CookieManagerLayer;
 
         dioxus::serve(|| async move {
+            // Start background cleanup task for user channels
+            api::globals::start_channel_cleanup_task();
+
             Ok(dioxus::server::router(App).layer(CookieManagerLayer::new()))
         });
     }
@@ -53,7 +65,11 @@ fn App() -> Element {
         document::Meta { name: "viewport", content: "width=device-width, initial-scale=1" }
         document::Title { "SoulBeet" }
 
-        AuthProvider { Router::<Route> {} }
+        AuthProvider {
+            SettingsProvider {
+                Router::<Route> {}
+            }
+        }
     }
 }
 
@@ -87,16 +103,31 @@ fn WebNavbar() -> Element {
     let mut auth = use_auth();
     let mut downloads_open = use_signal(|| false);
     let mut search_reset = use_signal(|| 0);
-    let mut downloads = use_signal::<HashMap<String, FileEntry>>(HashMap::new);
+    #[allow(unused_mut)] // mutated in websocket callback (web feature only)
+    let mut downloads = use_signal::<HashMap<String, DownloadProgress>>(HashMap::new);
 
+    let search_prefill = use_signal(|| None::<(String, String)>);
     use_context_provider(|| SearchReset(search_reset));
+    use_context_provider(|| SearchPrefill(search_prefill));
 
+    #[allow(unused_mut)]
+    let mut auto_download_signal = use_signal(|| None::<shared::download::AutoDownloadEvent>);
+    use_context_provider(|| AutoDownloadSignal(auto_download_signal));
+
+    #[cfg(feature = "web")]
     use_resilient_websocket(
         || api::download_updates_ws(WebSocketOptions::new()),
-        move |data: Vec<FileEntry>| {
-            let mut map = downloads.write();
-            for file in data {
-                map.insert(file.filename.clone(), file);
+        move |event: DownloadEvent| {
+            match event {
+                DownloadEvent::Progress(data) => {
+                    let mut map = downloads.write();
+                    for file in data {
+                        map.insert(file.item.clone(), file);
+                    }
+                }
+                DownloadEvent::AutoDownload(auto_event) => {
+                    auto_download_signal.set(Some(auto_event));
+                }
             }
         },
     );
@@ -126,6 +157,24 @@ fn WebNavbar() -> Element {
                             stroke_linejoin: "round",
                             stroke_width: "2",
                             d: "M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z",
+                        }
+                    }
+                }
+                Link {
+                    class: "nav-link text-white font-medium border-b-2 border-transparent hover:border-beet-accent pb-0.5",
+                    active_class: "border-beet-accent",
+                    to: Route::DashboardPage {},
+                    span { class: "hidden md:block", "Dashboard" }
+                    svg {
+                        class: "md:hidden w-6 h-6",
+                        fill: "none",
+                        stroke: "currentColor",
+                        view_box: "0 0 24 24",
+                        stroke_width: "1.5",
+                        path {
+                            stroke_linecap: "round",
+                            stroke_linejoin: "round",
+                            d: "M3 13.125C3 12.504 3.504 12 4.125 12h2.25c.621 0 1.125.504 1.125 1.125v6.75C7.5 20.496 6.996 21 6.375 21h-2.25A1.125 1.125 0 013 19.875v-6.75zM9.75 8.625c0-.621.504-1.125 1.125-1.125h2.25c.621 0 1.125.504 1.125 1.125v11.25c0 .621-.504 1.125-1.125 1.125h-2.25a1.125 1.125 0 01-1.125-1.125V8.625zM16.5 4.125c0-.621.504-1.125 1.125-1.125h2.25C20.496 3 21 3.504 21 4.125v15.75c0 .621-.504 1.125-1.125 1.125h-2.25a1.125 1.125 0 01-1.125-1.125V4.125z",
                         }
                     }
                 }
@@ -219,10 +268,87 @@ fn WebNavbar() -> Element {
                 }
             }
 
+            NavidromeBanner {}
+
             main { class: "px-4 sm:px-6 lg:px-8 flex-grow flex flex-col relative overflow-y-auto w-full py-8 no-scrollbar",
                 Outlet::<Route> {}
             }
             Downloads { is_open: downloads_open, downloads }
+        }
+    }
+}
+
+#[component]
+fn NavidromeBanner() -> Element {
+    let auth = use_auth();
+    let mut settings = ui::use_settings();
+    let status = auth.navidrome_status();
+
+    let dismissed = settings
+        .get()
+        .map(|s| s.navidrome_banner_dismissed)
+        .unwrap_or(false);
+
+    if dismissed
+        || matches!(
+            status,
+            NavidromeStatus::Connected | NavidromeStatus::Unknown
+        )
+    {
+        return rsx! {};
+    }
+
+    let (dot_color, label, message) = match status {
+        NavidromeStatus::InvalidCredentials => (
+            "bg-beet-accent",
+            "NAVIDROME",
+            "Credentials mismatch. Log in with your Navidrome password to reconnect.",
+        ),
+        NavidromeStatus::Offline => (
+            "bg-gray-500",
+            "NAVIDROME",
+            "Unreachable. Discovery and rating sync paused.",
+        ),
+        NavidromeStatus::MissingReportRealPath => (
+            "bg-yellow-500",
+            "NAVIDROME",
+            "ReportRealPath is not enabled on the Soulbeet player. Path features and auto-delete won't work. Enable it in Navidrome > Settings > Players.",
+        ),
+        _ => return rsx! {},
+    };
+
+    let dismiss = move |_| {
+        spawn(async move {
+            let _ = settings
+                .update(api::UpdateUserSettings {
+                    navidrome_banner_dismissed: Some(true),
+                    ..Default::default()
+                })
+                .await;
+        });
+    };
+
+    rsx! {
+        div { class: "mx-4 sm:mx-6 lg:mx-8 mt-2 px-3 py-2 bg-beet-panel border border-white/10 rounded flex items-center gap-3 text-xs font-mono",
+            span { class: format!("w-1.5 h-1.5 rounded-full {} shrink-0", dot_color) }
+            span { class: "text-gray-500 uppercase tracking-widest shrink-0 hidden sm:inline", "{label}" }
+            span { class: "text-gray-400 flex-1 min-w-0 truncate", "{message}" }
+            button {
+                class: "shrink-0 text-gray-600 hover:text-gray-300 transition-colors cursor-pointer p-2 -mr-1",
+                onclick: dismiss,
+                svg {
+                    class: "w-3.5 h-3.5",
+                    fill: "none",
+                    stroke: "currentColor",
+                    view_box: "0 0 24 24",
+                    path {
+                        stroke_linecap: "round",
+                        stroke_linejoin: "round",
+                        stroke_width: "2",
+                        d: "M6 18L18 6M6 6l12 12",
+                    }
+                }
+            }
         }
     }
 }

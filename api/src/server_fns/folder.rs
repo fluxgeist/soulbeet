@@ -5,6 +5,8 @@ use shared::library::DuplicateReport;
 #[cfg(feature = "server")]
 use super::server_error;
 #[cfg(feature = "server")]
+use crate::services::music_importer;
+#[cfg(feature = "server")]
 use crate::AuthSession;
 #[cfg(feature = "server")]
 use std::path::Path;
@@ -72,7 +74,6 @@ pub async fn get_folder_duplicates() -> Result<DuplicateReport, ServerFnError> {
 
     let paths: Vec<&Path> = folders.iter().map(|f| Path::new(&f.path)).collect();
 
-    soulbeet::beets::find_duplicates_across_libraries(paths)
-        .await
-        .map_err(server_error)
+    let importer = music_importer(None).await.map_err(server_error)?;
+    importer.find_duplicates(&paths).await.map_err(server_error)
 }

@@ -9,5 +9,8 @@ pub use layout::Layout;
 mod auth;
 pub use auth::*;
 
+mod settings_context;
+pub use settings_context::*;
+
 mod components;
 pub use components::*;

@@ -1,10 +1,6 @@
 use dioxus::prelude::*;
 
-#[derive(PartialEq, Clone, Copy, Debug)]
-pub enum SearchType {
-    Album,
-    Track,
-}
+pub use crate::settings_context::SearchType;
 
 #[component]
 pub fn SearchTypeToggle(search_type: Signal<SearchType>) -> Element {

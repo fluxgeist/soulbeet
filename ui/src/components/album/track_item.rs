@@ -1,5 +1,5 @@
 use dioxus::prelude::*;
-use shared::musicbrainz::Track;
+use shared::metadata::Track;
 
 use crate::Checkbox;
 

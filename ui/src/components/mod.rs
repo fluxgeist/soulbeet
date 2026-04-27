@@ -1,6 +1,10 @@
 pub mod album;
+pub mod confirm_modal;
 pub mod cover_art;
+pub mod dashboard;
+pub mod discovery;
 pub mod downloads;
+pub mod error_display;
 pub mod library;
 pub mod footer;
 pub mod login;
@@ -11,8 +15,10 @@ pub mod simple;
 pub mod status;
 
 pub use album::{Album, AlbumHeader};
+pub use confirm_modal::*;
 pub use cover_art::*;
 pub use downloads::*;
+pub use error_display::*;
 pub use library::*;
 pub use footer::Footer;
 pub use login::Login;

@@ -4,7 +4,7 @@ use serde::{Deserialize, Serialize};
 #[cfg(feature = "server")]
 use uuid::Uuid;
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[cfg_attr(feature = "server", derive(sqlx::FromRow))]
 pub struct Folder {
     pub id: String,
@@ -58,5 +58,27 @@ impl Folder {
             .await
             .map_err(|e| e.to_string())?;
         Ok(())
+    }
+
+    pub async fn get_by_id(id: &str) -> Result<Option<Folder>, String> {
+        sqlx::query_as::<_, Folder>("SELECT * FROM folders WHERE id = ?")
+            .bind(id)
+            .fetch_optional(&*DB)
+            .await
+            .map_err(|e| e.to_string())
+    }
+
+    pub fn discovery_path(&self) -> String {
+        format!("{}/Discovery", self.path)
+    }
+
+    pub fn discovery_profile_path(&self, profile: &str) -> String {
+        format!("{}/Discovery/{}", self.path, profile)
+    }
+
+    pub async fn has_discovery_enabled(&self) -> Result<bool, String> {
+        use crate::models::user_settings::UserSettings;
+        let settings = UserSettings::get(&self.user_id).await?;
+        Ok(settings.discovery_enabled && settings.discovery_folder_id.as_deref() == Some(&self.id))
     }
 }

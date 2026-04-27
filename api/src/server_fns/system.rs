@@ -1,26 +1,74 @@
 use dioxus::prelude::*;
-use shared::system::SystemHealth;
+use shared::system::{AvailableBackends, SystemHealth};
 
 #[cfg(feature = "server")]
-use crate::{globals::SLSKD_CLIENT, AuthSession};
+use shared::system::BackendInfo;
 
-#[get("/api/system/health", _: AuthSession)]
+#[cfg(feature = "server")]
+use crate::services::{
+    available_download_backends, available_importers, available_metadata_providers,
+    download_backend, music_importer, navidrome_client_for_user,
+};
+#[cfg(feature = "server")]
+use crate::AuthSession;
+
+#[get("/api/system/health", auth: AuthSession)]
 pub async fn get_system_health() -> Result<SystemHealth, ServerFnError> {
     #[cfg(feature = "server")]
     {
-        let slskd_online = SLSKD_CLIENT.check_connection().await;
+        let downloader_online = match download_backend(None).await {
+            Ok(backend) => backend.health_check().await,
+            Err(_) => false,
+        };
 
-        let beets_ready = {
-            use tokio::process::Command;
-            let output = Command::new("beet").arg("version").output().await;
-            output.map(|o| o.status.success()).unwrap_or(false)
+        let beets_ready = match music_importer(None).await {
+            Ok(importer) => importer.health_check().await,
+            Err(_) => false,
+        };
+
+        let navidrome_online = match navidrome_client_for_user(&auth.0.sub).await {
+            Ok(client) => client.ping().await.is_ok(),
+            Err(_) => false,
         };
 
         Ok(SystemHealth {
-            slskd_online,
+            downloader_online,
             beets_ready,
+            navidrome_online,
         })
     }
     #[cfg(not(feature = "server"))]
     Ok(SystemHealth::default())
+}
+
+#[get("/api/system/backends", _: AuthSession)]
+pub async fn get_backends() -> Result<AvailableBackends, ServerFnError> {
+    #[cfg(feature = "server")]
+    {
+        Ok(AvailableBackends {
+            metadata: available_metadata_providers()
+                .into_iter()
+                .map(|(id, name)| BackendInfo {
+                    id: id.to_string(),
+                    name: name.to_string(),
+                })
+                .collect(),
+            download: available_download_backends()
+                .into_iter()
+                .map(|(id, name)| BackendInfo {
+                    id: id.to_string(),
+                    name: name.to_string(),
+                })
+                .collect(),
+            importer: available_importers()
+                .into_iter()
+                .map(|(id, name)| BackendInfo {
+                    id: id.to_string(),
+                    name: name.to_string(),
+                })
+                .collect(),
+        })
+    }
+    #[cfg(not(feature = "server"))]
+    Ok(AvailableBackends::default())
 }

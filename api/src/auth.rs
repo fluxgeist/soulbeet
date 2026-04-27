@@ -1,15 +1,18 @@
 use serde::{Deserialize, Serialize};
+use shared::system::NavidromeStatus;
 
 #[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
 pub struct AuthResponse {
     pub username: String,
     pub user_id: String,
+    #[serde(default)]
+    pub navidrome_status: NavidromeStatus,
 }
 
 #[cfg(feature = "server")]
-use jsonwebtoken::{decode, encode, DecodingKey, EncodingKey, Header, Validation};
-#[cfg(feature = "server")]
 use crate::config::CONFIG;
+#[cfg(feature = "server")]
+use jsonwebtoken::{decode, encode, DecodingKey, EncodingKey, Header, Validation};
 
 pub static EXPIRATION_DAYS: i64 = 30;
 

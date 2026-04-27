@@ -35,6 +35,7 @@ pub enum DownloadState {
     ImportFailed,
     Aborted,
     Cancelled,
+    Rejected,
     Unknown(String),
 }
 
@@ -46,6 +47,7 @@ impl From<String> for DownloadState {
             "Completed" => DownloadState::Downloaded,
             "Aborted" => DownloadState::Aborted,
             "Cancelled" => DownloadState::Cancelled,
+            "Rejected" => DownloadState::Rejected,
             "Errored" => DownloadState::Errored,
             "Importing" => DownloadState::Importing,
             "Imported" => DownloadState::Imported,
@@ -179,6 +181,56 @@ impl FileEntry {
     }
 }
 
+/// Map slskd's TransferStates bitfield to a DownloadState.
+///
+/// TransferStates is a flags enum: Completed=16, Succeeded=32,
+/// Cancelled=64, TimedOut=128, Errored=256, Rejected=512,
+/// Aborted=1024. Queued=2, InProgress=8. Locally=2048, Remotely=4096.
+///
+/// Check terminal reasons first (Completed + reason flag), then active states.
+fn bitfield_to_download_state(value: u64) -> DownloadState {
+    const COMPLETED: u64 = 16;
+    const SUCCEEDED: u64 = 32;
+    const CANCELLED: u64 = 64;
+    const TIMED_OUT: u64 = 128;
+    const ERRORED: u64 = 256;
+    const REJECTED: u64 = 512;
+    const ABORTED: u64 = 1024;
+    const QUEUED: u64 = 2;
+    const IN_PROGRESS: u64 = 8;
+
+    if value & COMPLETED != 0 {
+        if value & SUCCEEDED != 0 {
+            return DownloadState::Downloaded;
+        }
+        if value & REJECTED != 0 {
+            return DownloadState::Rejected;
+        }
+        if value & CANCELLED != 0 {
+            return DownloadState::Cancelled;
+        }
+        if value & TIMED_OUT != 0 {
+            return DownloadState::Errored;
+        }
+        if value & ERRORED != 0 {
+            return DownloadState::Errored;
+        }
+        if value & ABORTED != 0 {
+            return DownloadState::Aborted;
+        }
+        return DownloadState::Downloaded;
+    }
+
+    if value & IN_PROGRESS != 0 {
+        return DownloadState::InProgress;
+    }
+    if value & QUEUED != 0 {
+        return DownloadState::Queued;
+    }
+
+    DownloadState::Unknown(format!("bitfield:{}", value))
+}
+
 fn deserialize_download_state<'de, D>(deserializer: D) -> Result<Vec<DownloadState>, D::Error>
 where
     D: Deserializer<'de>,
@@ -190,6 +242,20 @@ where
 
         fn expecting(&self, formatter: &mut fmt::Formatter) -> fmt::Result {
             formatter.write_str("a comma-separated string or a sequence of DownloadStates")
+        }
+
+        fn visit_u64<E>(self, value: u64) -> Result<Self::Value, E>
+        where
+            E: de::Error,
+        {
+            Ok(vec![bitfield_to_download_state(value)])
+        }
+
+        fn visit_i64<E>(self, value: i64) -> Result<Self::Value, E>
+        where
+            E: de::Error,
+        {
+            self.visit_u64(value as u64)
         }
 
         fn visit_str<E>(self, value: &str) -> Result<Self::Value, E>
@@ -426,4 +492,139 @@ pub struct SearchResponse {
     pub has_more: bool,
     pub total_results: usize,
     pub state: SearchState,
+}
+
+// Conversions to abstract types
+
+impl From<SearchState> for crate::download::SearchState {
+    fn from(state: SearchState) -> Self {
+        match state {
+            SearchState::InProgress => crate::download::SearchState::InProgress,
+            SearchState::Completed => crate::download::SearchState::Completed,
+            SearchState::NotFound => crate::download::SearchState::NotFound,
+            SearchState::TimedOut => crate::download::SearchState::TimedOut,
+        }
+    }
+}
+
+impl From<TrackResult> for crate::download::DownloadableItem {
+    fn from(track: TrackResult) -> Self {
+        Self {
+            id: track.base.filename.clone(),
+            source: track.base.username.clone(),
+            title: track.title,
+            artist: track.artist,
+            album: track.album,
+            size: Some(track.base.size as u64),
+            duration: track.base.duration.map(|d| d as u32),
+            quality: track.base.quality(),
+            quality_score: track.base.quality_score(),
+            backend_data: Some(serde_json::to_string(&track.base).unwrap_or_default()),
+        }
+    }
+}
+
+impl From<AlbumResult> for crate::download::DownloadableGroup {
+    fn from(album: AlbumResult) -> Self {
+        Self {
+            source: album.username.clone(),
+            group_id: album.album_path.clone(),
+            title: album.album_title,
+            artist: album.artist,
+            item_count: album.track_count,
+            total_size: album.total_size as u64,
+            items: album.tracks.into_iter().map(Into::into).collect(),
+            quality: album.dominant_quality,
+            score: album.score,
+        }
+    }
+}
+
+impl From<FileEntry> for crate::download::DownloadProgress {
+    fn from(entry: FileEntry) -> Self {
+        // Check all state elements, preferring error/rejection states over success.
+        // This prevents "Completed, Rejected" from being treated as Downloaded
+        // when only the first element is checked.
+        let state = if let Some(priority_state) = entry.state.iter().find(|s| {
+            matches!(
+                s,
+                DownloadState::Rejected
+                    | DownloadState::Errored
+                    | DownloadState::Aborted
+                    | DownloadState::Cancelled
+                    | DownloadState::ImportFailed
+            )
+        }) {
+            priority_state.clone()
+        } else {
+            entry
+                .state
+                .first()
+                .cloned()
+                .unwrap_or(DownloadState::Unknown("unknown".into()))
+        };
+        Self {
+            id: entry.id,
+            source: entry.username,
+            item: entry.filename,
+            size: entry.size,
+            transferred: entry.bytes_transferred,
+            state: state.into(),
+            percent: entry.percent_complete,
+            speed: entry.average_speed,
+            error: entry.exception,
+            backend: Some("slskd".into()),
+            batch_id: None,
+            batch_label: None,
+        }
+    }
+}
+
+impl From<DownloadState> for crate::download::DownloadState {
+    fn from(state: DownloadState) -> Self {
+        use crate::download::DownloadState as DS;
+        match state {
+            DownloadState::Queued => DS::Queued,
+            DownloadState::InProgress => DS::InProgress,
+            DownloadState::Downloaded => DS::Completed,
+            DownloadState::Importing => DS::Importing,
+            DownloadState::Imported => DS::Imported,
+            DownloadState::ImportSkipped => DS::ImportSkipped,
+            DownloadState::Errored => DS::Failed("Download error".into()),
+            DownloadState::ImportFailed => DS::Failed("Import failed".into()),
+            DownloadState::Aborted => DS::Failed("Aborted".into()),
+            DownloadState::Cancelled => DS::Cancelled,
+            DownloadState::Rejected => DS::Failed("Transfer rejected by peer".into()),
+            DownloadState::Unknown(s) => DS::Failed(format!("Unknown state: {s}")),
+        }
+    }
+}
+
+impl From<DownloadResponse> for crate::download::QueuedDownload {
+    fn from(resp: DownloadResponse) -> Self {
+        Self {
+            id: resp.filename.clone(),
+            source: resp.username,
+            item: resp.filename,
+            size: resp.size,
+            error: resp.error,
+        }
+    }
+}
+
+impl crate::download::DownloadableItem {
+    /// Convert back to slskd TrackResult for download
+    pub fn to_slskd_track(&self) -> Option<TrackResult> {
+        let base: SearchResult = self
+            .backend_data
+            .as_ref()
+            .and_then(|data| serde_json::from_str(data).ok())?;
+        Some(TrackResult {
+            base,
+            artist: self.artist.clone(),
+            title: self.title.clone(),
+            album: self.album.clone(),
+            match_score: self.quality_score,
+        })
+    }
 }

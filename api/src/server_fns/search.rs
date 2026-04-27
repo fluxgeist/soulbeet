@@ -1,80 +1,117 @@
 use dioxus::prelude::*;
 use serde::{Deserialize, Serialize};
 use shared::{
-    download::DownloadQuery,
-    musicbrainz::{AlbumWithTracks, SearchResult},
-    slskd::SearchResponse,
+    download::{DownloadQuery, SearchResult as DownloadSearchResult},
+    metadata::{AlbumWithTracks, Provider, SearchResults},
 };
 
 #[cfg(feature = "server")]
-use chrono::Duration;
+use crate::models::user_settings::UserSettings;
 #[cfg(feature = "server")]
-use soulbeet::musicbrainz;
-
+use crate::services::{download_backend, metadata_provider};
 #[cfg(feature = "server")]
-use crate::{globals::SLSKD_CLIENT, server_fns::server_error, AuthSession};
-
-#[cfg(feature = "server")]
-static SLSKD_MAX_SEARCH_DURATION: i64 = 120; // seconds
+use crate::{server_fns::server_error, AuthSession};
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct SearchQuery {
     pub artist: Option<String>,
     pub query: String,
+    #[serde(default)]
+    pub provider: Option<String>,
 }
 
-#[post("/api/musicbrainz/search/album", _: AuthSession)]
-pub async fn search_album(input: SearchQuery) -> Result<Vec<SearchResult>, ServerFnError> {
-    musicbrainz::search(
-        &input.artist,
-        &input.query,
-        musicbrainz::SearchType::Album,
-        25,
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct AlbumQuery {
+    pub id: String,
+    #[serde(default)]
+    pub provider: Option<Provider>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct PollQuery {
+    pub search_id: String,
+    #[serde(default)]
+    pub backend: Option<String>,
+}
+
+#[post("/api/metadata/search/album", auth: AuthSession)]
+pub async fn search_album(input: SearchQuery) -> Result<SearchResults, ServerFnError> {
+    let user_settings = UserSettings::get(&auth.0.sub).await.map_err(server_error)?;
+    let provider = metadata_provider(
+        input.provider.as_deref(),
+        user_settings.lastfm_api_key.as_deref(),
     )
     .await
-    .map_err(server_error)
+    .map_err(server_error)?;
+
+    let provider_enum: Provider = provider.id().parse().unwrap_or_default();
+    let results = provider
+        .search_albums(input.artist.as_deref(), &input.query, 25)
+        .await
+        .map_err(server_error)?;
+
+    Ok(SearchResults {
+        provider: provider_enum,
+        results,
+    })
 }
 
-#[post("/api/musicbrainz/search/track", _: AuthSession)]
-pub async fn search_track(input: SearchQuery) -> Result<Vec<SearchResult>, ServerFnError> {
-    musicbrainz::search(
-        &input.artist,
-        &input.query,
-        musicbrainz::SearchType::Track,
-        25,
+#[post("/api/metadata/search/track", auth: AuthSession)]
+pub async fn search_track(input: SearchQuery) -> Result<SearchResults, ServerFnError> {
+    let user_settings = UserSettings::get(&auth.0.sub).await.map_err(server_error)?;
+    let provider = metadata_provider(
+        input.provider.as_deref(),
+        user_settings.lastfm_api_key.as_deref(),
     )
     .await
-    .map_err(server_error)
+    .map_err(server_error)?;
+
+    let provider_enum: Provider = provider.id().parse().unwrap_or_default();
+    let results = provider
+        .search_tracks(input.artist.as_deref(), &input.query, 25)
+        .await
+        .map_err(server_error)?;
+
+    Ok(SearchResults {
+        provider: provider_enum,
+        results,
+    })
 }
 
-#[get("/api/musicbrainz/album/:id", _: AuthSession)]
-pub async fn find_album(id: String) -> Result<AlbumWithTracks, ServerFnError> {
-    musicbrainz::find_album(&id).await.map_err(server_error)
+#[post("/api/metadata/album", auth: AuthSession)]
+pub async fn find_album(input: AlbumQuery) -> Result<AlbumWithTracks, ServerFnError> {
+    let user_settings = UserSettings::get(&auth.0.sub).await.map_err(server_error)?;
+    let provider_str = input.provider.map(|p| p.to_string());
+    let provider = metadata_provider(
+        provider_str.as_deref(),
+        user_settings.lastfm_api_key.as_deref(),
+    )
+    .await
+    .map_err(server_error)?;
+
+    provider.get_album(&input.id).await.map_err(server_error)
 }
 
-#[post("/api/slskd/search/start", _: AuthSession)]
+#[post("/api/download/search/start", _: AuthSession)]
 pub async fn start_download_search(data: DownloadQuery) -> Result<String, ServerFnError> {
-    let album = data.album;
-    let tracks = data.tracks;
+    let backend = download_backend(data.backend.as_deref())
+        .await
+        .map_err(|e| server_error(format!("download backend not available: {}", e)))?;
 
-    SLSKD_CLIENT
-        .start_search(album, tracks, Duration::seconds(SLSKD_MAX_SEARCH_DURATION))
+    backend
+        .start_search(data.album.as_ref(), &data.tracks)
         .await
         .map_err(server_error)
 }
 
-#[post("/api/slskd/search/poll", _: AuthSession)]
-pub async fn poll_download_search(search_id: String) -> Result<SearchResponse, ServerFnError> {
-    let (results, has_more, state) = SLSKD_CLIENT
-        .poll_search(search_id.clone())
+#[post("/api/download/search/poll", _: AuthSession)]
+pub async fn poll_download_search(input: PollQuery) -> Result<DownloadSearchResult, ServerFnError> {
+    let backend = download_backend(input.backend.as_deref())
         .await
-        .map_err(server_error)?;
+        .map_err(|e| server_error(format!("download backend not available: {}", e)))?;
 
-    Ok(SearchResponse {
-        search_id,
-        total_results: results.len(),
-        results,
-        has_more,
-        state,
-    })
+    backend
+        .poll_search(&input.search_id)
+        .await
+        .map_err(server_error)
 }
