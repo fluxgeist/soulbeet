@@ -8,8 +8,8 @@ RUN apt-get update && apt-get install -y \
   nodejs \
   npm
 
-# Install Dioxus CLI
-RUN cargo install dioxus-cli
+# Install Dioxus CLI (must match dioxus 0.7.2 in Cargo.toml)
+RUN cargo install dioxus-cli --version 0.7.2 --locked
 
 # Create app directory
 WORKDIR /app
@@ -87,4 +87,4 @@ ENV IP=0.0.0.0
 # Expose the port
 EXPOSE 9765
 
-ENTRYPOINT ["/app/server/server"]
+ENTRYPOINT ["/app/server/web"]

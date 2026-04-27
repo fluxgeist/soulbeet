@@ -33,4 +33,5 @@ pub struct AlbumEntry {
     pub album: String,
     pub track_count: usize,
     pub album_path: String,
+    pub added: f64,
 }

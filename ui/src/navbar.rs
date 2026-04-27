@@ -26,7 +26,7 @@ pub fn Navbar(children: Element) -> Element {
             }
 
             // Menu
-            nav { class: "flex items-center gap-8 bg-beet-panel/50 px-6 py-2 rounded-full border border-white/5 backdrop-blur-sm",
+            nav { class: "flex items-center gap-4 sm:gap-8 bg-beet-panel/50 px-3 sm:px-6 py-2 rounded-full border border-white/5 backdrop-blur-sm",
                 {children}
             }
         }

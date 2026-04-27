@@ -97,14 +97,9 @@ pub async fn import(
         as_album
     );
 
-    // Use a library database specific to this target directory for duplicate detection
-    let library_path = target.join(".beets_library.db");
-
     let mut cmd = Command::new("beet");
     cmd.arg("-c")
         .arg(&config_path)
-        .arg("-l") // library database path (for duplicate detection)
-        .arg(&library_path)
         .arg("-d") // destination directory
         .arg(target)
         .arg("import")

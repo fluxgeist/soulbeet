@@ -203,7 +203,19 @@ fn WebNavbar() -> Element {
                 button {
                     class: "nav-link text-red-400 hover:text-red-300 text-xs uppercase tracking-widest font-mono cursor-pointer",
                     onclick: logout,
-                    "Logout"
+                    span { class: "hidden md:block", "Logout" }
+                    svg {
+                        class: "md:hidden w-5 h-5",
+                        fill: "none",
+                        stroke: "currentColor",
+                        view_box: "0 0 24 24",
+                        path {
+                            stroke_linecap: "round",
+                            stroke_linejoin: "round",
+                            stroke_width: "2",
+                            d: "M17 16l4-4m0 0l-4-4m4 4H7m6 4v1a3 3 0 01-3 3H6a3 3 0 01-3-3V7a3 3 0 013-3h4a3 3 0 013 3v1",
+                        }
+                    }
                 }
             }
 

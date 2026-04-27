@@ -27,27 +27,28 @@ pub async fn get_library() -> Result<Vec<AlbumEntry>, ServerFnError> {
         .unwrap_or_else(|_| "/data/musiclibrary.db".to_string());
 
     let library_dir_clone = library_dir.clone();
-    let rows: Vec<(String, String, String)> = tokio::task::spawn_blocking(move || {
+    let rows: Vec<(String, String, String, f64)> = tokio::task::spawn_blocking(move || {
         let db = rusqlite::Connection::open(&beets_db)?;
         let mut stmt = db.prepare(
-            "SELECT CAST(path AS TEXT), albumartist, album FROM items WHERE albumartist != '' AND album != ''"
+            "SELECT CAST(path AS TEXT), albumartist, album, added FROM items WHERE albumartist != '' AND album != ''"
         )?;
-        let rows: Vec<(String, String, String)> = stmt
+        let rows: Vec<(String, String, String, f64)> = stmt
             .query_map([], |row| {
                 Ok((
                     row.get::<_, String>(0)?,
                     row.get::<_, String>(1)?,
                     row.get::<_, String>(2)?,
+                    row.get::<_, f64>(3).unwrap_or(0.0),
                 ))
             })?
             .filter_map(|r| r.ok())
-            .map(|(rel_path, artist, album)| {
+            .map(|(rel_path, artist, album, added)| {
                 let full_path = if rel_path.starts_with('/') {
                     rel_path
                 } else {
                     format!("{}/{}", library_dir_clone, rel_path)
                 };
-                (full_path, artist, album)
+                (full_path, artist, album, added)
             })
             .collect();
         Ok::<_, rusqlite::Error>(rows)
@@ -56,9 +57,9 @@ pub async fn get_library() -> Result<Vec<AlbumEntry>, ServerFnError> {
     .map_err(|e| server_error(format!("Task error: {}", e)))?
     .map_err(|e| server_error(format!("Failed to query beets DB: {}", e)))?;
 
-    let mut album_map: HashMap<(String, String), (usize, String)> = HashMap::new();
+    let mut album_map: HashMap<(String, String), (usize, String, f64)> = HashMap::new();
 
-    for (path, artist, album) in rows {
+    for (path, artist, album, added) in rows {
         let album_dir = Path::new(&path)
             .parent()
             .map(|p| p.to_string_lossy().to_string())
@@ -66,21 +67,23 @@ pub async fn get_library() -> Result<Vec<AlbumEntry>, ServerFnError> {
 
         let entry = album_map
             .entry((artist.clone(), album.clone()))
-            .or_insert((0, album_dir));
+            .or_insert((0, album_dir, added));
         entry.0 += 1;
+        if added > entry.2 {
+            entry.2 = added;
+        }
     }
 
-    let mut albums: Vec<AlbumEntry> = album_map
+    let albums: Vec<AlbumEntry> = album_map
         .into_iter()
-        .map(|((artist, album), (track_count, album_path))| AlbumEntry {
+        .map(|((artist, album), (track_count, album_path, added))| AlbumEntry {
             artist,
             album,
             track_count,
             album_path,
+            added,
         })
         .collect();
-
-    albums.sort_by(|a, b| a.artist.cmp(&b.artist).then(a.album.cmp(&b.album)));
 
     Ok(albums)
 }

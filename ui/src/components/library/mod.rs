@@ -4,12 +4,20 @@ use shared::library::AlbumEntry;
 
 use crate::auth::use_auth;
 
+#[derive(Clone, PartialEq)]
+enum SortMode {
+    Artist,
+    Album,
+    DateAdded,
+}
+
 #[component]
 pub fn Library() -> Element {
     let mut albums = use_signal(Vec::<AlbumEntry>::new);
     let mut error = use_signal(|| "".to_string());
     let mut deleting = use_signal(|| None::<String>);
     let mut confirm_delete = use_signal(|| None::<AlbumEntry>);
+    let mut sort_mode = use_signal(|| SortMode::Artist);
     let auth = use_auth();
 
     let fetch_library = move || async move {
@@ -22,17 +30,6 @@ pub fn Library() -> Element {
     use_future(move || async move {
         fetch_library().await;
     });
-
-    // Group albums by artist
-    let grouped: Vec<(String, Vec<AlbumEntry>)> = {
-        let mut map: std::collections::HashMap<String, Vec<AlbumEntry>> = std::collections::HashMap::new();
-        for album in albums.read().iter() {
-            map.entry(album.artist.clone()).or_default().push(album.clone());
-        }
-        let mut entries: Vec<(String, Vec<AlbumEntry>)> = map.into_iter().collect();
-        entries.sort_by(|(a, _), (b, _)| a.to_lowercase().cmp(&b.to_lowercase()));
-        entries
-    };
 
     let handle_delete = move |entry: AlbumEntry| async move {
         let key = format!("{}/{}", entry.artist, entry.album);
@@ -57,9 +54,79 @@ pub fn Library() -> Element {
         confirm_delete.set(None);
     };
 
+    let mut sorted = albums.read().clone();
+    match *sort_mode.read() {
+        SortMode::Artist => sorted.sort_by(|a, b| {
+            a.artist
+                .to_lowercase()
+                .cmp(&b.artist.to_lowercase())
+                .then(a.album.to_lowercase().cmp(&b.album.to_lowercase()))
+        }),
+        SortMode::Album => sorted.sort_by(|a, b| {
+            a.album
+                .to_lowercase()
+                .cmp(&b.album.to_lowercase())
+                .then(a.artist.to_lowercase().cmp(&b.artist.to_lowercase()))
+        }),
+        SortMode::DateAdded => sorted.sort_by(|a, b| {
+            b.added
+                .partial_cmp(&a.added)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        }),
+    }
+
+    // Sequential grouping preserves sort order (only used in Artist mode)
+    let grouped: Vec<(String, Vec<AlbumEntry>)> =
+        sorted.iter().fold(vec![], |mut acc, album| {
+            if let Some(last) = acc.last_mut() {
+                if last.0 == album.artist {
+                    last.1.push(album.clone());
+                    return acc;
+                }
+            }
+            acc.push((album.artist.clone(), vec![album.clone()]));
+            acc
+        });
+
+    let is_artist = *sort_mode.read() == SortMode::Artist;
+    let is_album = *sort_mode.read() == SortMode::Album;
+    let is_date = *sort_mode.read() == SortMode::DateAdded;
+
     rsx! {
         div { class: "max-w-4xl mx-auto",
-            h1 { class: "text-2xl font-bold text-beet-accent font-display mb-6", "Library" }
+            div { class: "flex flex-wrap items-center justify-between gap-3 mb-6",
+                h1 { class: "text-2xl font-bold text-beet-accent font-display", "Library" }
+                div { class: "flex items-center gap-2",
+                    span { class: "text-xs text-gray-500 font-mono hidden sm:inline", "Sort by" }
+                    button {
+                        class: if is_artist {
+                            "px-3 py-1 rounded text-xs font-mono text-beet-accent bg-white/10 border border-white/20 cursor-pointer transition-colors"
+                        } else {
+                            "px-3 py-1 rounded text-xs font-mono text-gray-400 bg-white/5 border border-transparent hover:text-white hover:bg-white/10 cursor-pointer transition-colors"
+                        },
+                        onclick: move |_| sort_mode.set(SortMode::Artist),
+                        "Artist"
+                    }
+                    button {
+                        class: if is_album {
+                            "px-3 py-1 rounded text-xs font-mono text-beet-accent bg-white/10 border border-white/20 cursor-pointer transition-colors"
+                        } else {
+                            "px-3 py-1 rounded text-xs font-mono text-gray-400 bg-white/5 border border-transparent hover:text-white hover:bg-white/10 cursor-pointer transition-colors"
+                        },
+                        onclick: move |_| sort_mode.set(SortMode::Album),
+                        "Album"
+                    }
+                    button {
+                        class: if is_date {
+                            "px-3 py-1 rounded text-xs font-mono text-beet-accent bg-white/10 border border-white/20 cursor-pointer transition-colors"
+                        } else {
+                            "px-3 py-1 rounded text-xs font-mono text-gray-400 bg-white/5 border border-transparent hover:text-white hover:bg-white/10 cursor-pointer transition-colors"
+                        },
+                        onclick: move |_| sort_mode.set(SortMode::DateAdded),
+                        "Date Added"
+                    }
+                }
+            }
 
             if !error().is_empty() {
                 div { class: "mb-4 p-4 bg-red-900/20 border border-red-500/50 rounded text-red-400 font-mono text-sm",
@@ -99,12 +166,13 @@ pub fn Library() -> Element {
                 }
             }
 
-            if albums.read().is_empty() {
+            if sorted.is_empty() {
                 div { class: "text-center py-20 text-gray-500 font-mono",
                     p { class: "text-lg mb-2", "No albums in library" }
                     p { class: "text-sm", "Download some music from the Search tab to get started." }
                 }
-            } else {
+            } else if is_artist {
+                // Grouped by artist
                 div { class: "space-y-6",
                     {
                         grouped.iter().map(|(artist, artist_albums)| {
@@ -115,7 +183,7 @@ pub fn Library() -> Element {
                                     }
                                     div { class: "space-y-1",
                                         {
-                                            artist_albums.into_iter().map(|entry| {
+                                            artist_albums.iter().map(|entry| {
                                                 let entry_for_delete = entry.clone();
                                                 let key = format!("{}/{}", entry.artist, entry.album);
                                                 let is_deleting = deleting.read().as_deref() == Some(&key);
@@ -124,16 +192,14 @@ pub fn Library() -> Element {
                                                     div {
                                                         key: "{key}",
                                                         class: "flex items-center justify-between p-3 bg-white/5 rounded hover:bg-white/8 transition-colors group",
-                                                        div { class: "flex items-center gap-3 min-w-0",
-                                                            div { class: "min-w-0",
-                                                                span { class: "text-white font-medium block truncate", "{entry.album}" }
-                                                                span { class: "text-gray-500 text-xs font-mono",
-                                                                    "{entry.track_count} {track_label}"
-                                                                }
+                                                        div { class: "min-w-0",
+                                                            span { class: "text-white font-medium block truncate", "{entry.album}" }
+                                                            span { class: "text-gray-500 text-xs font-mono",
+                                                                "{entry.track_count} {track_label}"
                                                             }
                                                         }
                                                         button {
-                                                            class: "opacity-0 group-hover:opacity-100 text-xs font-mono text-gray-500 hover:text-red-400 transition-all underline decoration-dotted ml-4 shrink-0",
+                                                            class: "sm:opacity-0 sm:group-hover:opacity-100 text-xs font-mono text-gray-500 hover:text-red-400 transition-all underline decoration-dotted ml-4 shrink-0",
                                                             disabled: is_deleting,
                                                             onclick: move |_| confirm_delete.set(Some(entry_for_delete.clone())),
                                                             if is_deleting { "Deleting..." } else { "Delete" }
@@ -142,6 +208,36 @@ pub fn Library() -> Element {
                                                 }
                                             })
                                         }
+                                    }
+                                }
+                            }
+                        })
+                    }
+                }
+            } else {
+                // Flat list (Album or Date Added sort)
+                div { class: "space-y-1",
+                    {
+                        sorted.iter().map(|entry| {
+                            let entry_for_delete = entry.clone();
+                            let key = format!("{}/{}", entry.artist, entry.album);
+                            let is_deleting = deleting.read().as_deref() == Some(&key);
+                            let track_label = if entry.track_count == 1 { "track" } else { "tracks" };
+                            rsx! {
+                                div {
+                                    key: "{key}",
+                                    class: "flex items-center justify-between p-3 bg-white/5 rounded hover:bg-white/8 transition-colors group",
+                                    div { class: "min-w-0",
+                                        span { class: "text-white font-medium block truncate", "{entry.album}" }
+                                        span { class: "text-gray-500 text-xs font-mono",
+                                            "{entry.artist} · {entry.track_count} {track_label}"
+                                        }
+                                    }
+                                    button {
+                                        class: "sm:opacity-0 sm:group-hover:opacity-100 text-xs font-mono text-gray-500 hover:text-red-400 transition-all underline decoration-dotted ml-4 shrink-0",
+                                        disabled: is_deleting,
+                                        onclick: move |_| confirm_delete.set(Some(entry_for_delete.clone())),
+                                        if is_deleting { "Deleting..." } else { "Delete" }
                                     }
                                 }
                             }
