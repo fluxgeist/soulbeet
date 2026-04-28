@@ -72,7 +72,7 @@ COPY --from=beets-builder /opt/venv /opt/venv
 WORKDIR /app
 
 # Copy artifacts from builder
-COPY --from=builder /app/target/dx/web/release/server /app/server
+COPY --from=builder /app/target/dx/web/release/web /app/server
 
 
 # Copy empty data directory to ensure /data exists

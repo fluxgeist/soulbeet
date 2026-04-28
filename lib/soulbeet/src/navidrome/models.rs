@@ -201,4 +201,7 @@ pub struct NativeSong {
     pub id: String,
     pub path: String,
     pub title: String,
+    /// Per-user rating (1–5) from the annotation table. None if not rated.
+    #[serde(default)]
+    pub rating: Option<u8>,
 }

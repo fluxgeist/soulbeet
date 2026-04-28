@@ -6,11 +6,11 @@ use super::server_error;
 #[cfg(feature = "server")]
 use crate::AuthSession;
 #[cfg(feature = "server")]
+use crate::services::navidrome_client_for_user;
+#[cfg(feature = "server")]
 use std::collections::HashMap;
 #[cfg(feature = "server")]
 use std::path::Path;
-#[cfg(feature = "server")]
-use tokio::io::AsyncWriteExt;
 #[cfg(feature = "server")]
 use tokio::process::Command;
 #[cfg(feature = "server")]
@@ -94,7 +94,7 @@ pub async fn delete_library_album(
     artist: String,
     album: String,
 ) -> Result<(), ServerFnError> {
-    let _claims = auth.0;
+    let claims = auth.0;
 
     // 1. Delete files from disk
     tokio::fs::remove_dir_all(&album_path)
@@ -157,28 +157,159 @@ print(f"Cleared {{before - len(history)}} entries from taghistory")
         .output()
         .await;
 
-    // 4. Remove from Navidrome DB directly via SQLite
-    if let Ok(navidrome_db) = std::env::var("NAVIDROME_DB_PATH") {
-        let album_name = album.clone();
-        let artist_name = artist.clone();
-        tokio::task::spawn_blocking(move || {
-            let db = rusqlite::Connection::open(&navidrome_db)?;
-            // Find album ID by name + artist
-            let album_id: Option<String> = db
-                .query_row(
-                    "SELECT id FROM album WHERE name = ?1 AND album_artist = ?2",
-                    rusqlite::params![album_name, artist_name],
-                    |row| row.get(0),
-                )
-                .ok();
-            if let Some(id) = album_id {
-                db.execute("DELETE FROM media_file WHERE album_id = ?1", rusqlite::params![id])?;
-                db.execute("DELETE FROM album WHERE id = ?1", rusqlite::params![id])?;
+    // 4. Trigger a Navidrome library scan so it removes the now-missing files from its DB
+    if let Ok(client) = navidrome_client_for_user(&claims.sub).await {
+        if let Err(e) = client.start_scan().await {
+            tracing::warn!("Failed to trigger Navidrome scan after delete: {}", e);
+        }
+    }
+
+    Ok(())
+}
+
+/// Consolidate a split album: find all directories in the beets DB that contain tracks
+/// for the given (albumartist, album), pick the one with the most tracks as canonical,
+/// move all other tracks into it, update beets DB paths, then trigger a Navidrome scan.
+/// This fixes the case where Navidrome shows the same album as multiple entries because
+/// beets placed tracks in more than one directory during import.
+#[post("/api/library/album/consolidate", auth: AuthSession)]
+pub async fn consolidate_album(
+    artist: String,
+    album: String,
+) -> Result<(), ServerFnError> {
+    let claims = auth.0;
+
+    let beets_db = std::env::var("BEETS_DB")
+        .unwrap_or_else(|_| "/data/musiclibrary.db".to_string());
+    let library_dir = std::env::var("BEETS_LIBRARY_DIR")
+        .unwrap_or_else(|_| "/app/library".to_string());
+
+    let artist_c = artist.clone();
+    let album_c = album.clone();
+    let lib_c = library_dir.clone();
+
+    // 1. Find all unique directories containing tracks for this album, with their track counts.
+    //    Returns (abs_path, rel_path, count) sorted descending so [0] is the canonical dir.
+    let dirs: Vec<(String, String, usize)> = tokio::task::spawn_blocking(move || {
+        let db = rusqlite::Connection::open(&beets_db)?;
+        let mut stmt = db.prepare(
+            "SELECT CAST(path AS TEXT) FROM items \
+             WHERE albumartist = ?1 AND album = ?2",
+        )?;
+        let paths: Vec<String> = stmt
+            .query_map(rusqlite::params![artist_c, album_c], |row| {
+                row.get::<_, String>(0)
+            })?
+            .filter_map(|r| r.ok())
+            .collect();
+
+        // Build a map of dir → count, storing both abs and rel versions
+        let mut dir_map: std::collections::HashMap<String, (String, usize)> =
+            std::collections::HashMap::new();
+        let lib_prefix = format!("{}/", lib_c);
+        for p in &paths {
+            let abs = if p.starts_with('/') {
+                p.clone()
+            } else {
+                format!("{}/{}", lib_c, p)
+            };
+            let abs_dir = std::path::Path::new(&abs)
+                .parent()
+                .map(|d| d.to_string_lossy().to_string())
+                .unwrap_or_default();
+            let rel_dir = abs_dir
+                .strip_prefix(&lib_prefix)
+                .unwrap_or(&abs_dir)
+                .to_string();
+            let e = dir_map.entry(abs_dir.clone()).or_insert((rel_dir, 0));
+            e.1 += 1;
+        }
+
+        let mut dirs: Vec<(String, String, usize)> = dir_map
+            .into_iter()
+            .map(|(abs, (rel, cnt))| (abs, rel, cnt))
+            .collect();
+        // Canonical = most tracks first
+        dirs.sort_by(|a, b| b.2.cmp(&a.2));
+        Ok::<_, rusqlite::Error>(dirs)
+    })
+    .await
+    .map_err(|e| server_error(format!("Task error: {}", e)))?
+    .map_err(|e| server_error(format!("DB error: {}", e)))?;
+
+    if dirs.len() <= 1 {
+        // Already consolidated — still trigger a scan in case Navidrome is stale
+        if let Ok(client) = navidrome_client_for_user(&claims.sub).await {
+            let _ = client.start_scan().await;
+        }
+        return Ok(());
+    }
+
+    let (canonical_abs, canonical_rel, _) = &dirs[0];
+
+    // 2. Move files from every minority directory into the canonical one, update DB paths.
+    for (src_abs, src_rel, _) in dirs.iter().skip(1) {
+        // Move files
+        if let Ok(mut rd) = tokio::fs::read_dir(src_abs).await {
+            while let Ok(Some(entry)) = rd.next_entry().await {
+                let ft = entry.file_type().await;
+                if !matches!(ft, Ok(ft) if ft.is_file()) {
+                    continue;
+                }
+                let src_file = entry.path();
+                let name = src_file
+                    .file_name()
+                    .unwrap_or_default()
+                    .to_string_lossy()
+                    .to_string();
+                let mut dest = Path::new(canonical_abs).join(&name);
+                if dest.exists() {
+                    let stem = Path::new(&name)
+                        .file_stem()
+                        .unwrap_or_default()
+                        .to_string_lossy()
+                        .to_string();
+                    let ext = Path::new(&name)
+                        .extension()
+                        .map(|e| format!(".{}", e.to_string_lossy()))
+                        .unwrap_or_default();
+                    dest = Path::new(canonical_abs).join(format!("{}_2{}", stem, ext));
+                }
+                let _ = tokio::fs::rename(&src_file, &dest).await;
             }
+        }
+
+        // Update beets DB: rewrite path prefix for tracks that were in src_abs
+        let beets_db2 = std::env::var("BEETS_DB")
+            .unwrap_or_else(|_| "/data/musiclibrary.db".to_string());
+        let src_rel_c = src_rel.clone();
+        let canonical_rel_c = canonical_rel.clone();
+        tokio::task::spawn_blocking(move || {
+            let db = rusqlite::Connection::open(&beets_db2)?;
+            db.execute(
+                "UPDATE items SET \
+                    path = CAST(replace(CAST(path AS TEXT), ?1, ?2) AS BLOB) \
+                 WHERE CAST(path AS TEXT) LIKE ?3",
+                rusqlite::params![
+                    src_rel_c,
+                    canonical_rel_c,
+                    format!("{}%", src_rel_c),
+                ],
+            )?;
             Ok::<_, rusqlite::Error>(())
         })
         .await
         .ok();
+
+        // Remove the now-empty source directory
+        let _ = tokio::fs::remove_dir(src_abs).await;
+    }
+
+    // 3. Trigger Navidrome scan so it picks up the consolidated directory
+    if let Ok(client) = navidrome_client_for_user(&claims.sub).await {
+        if let Err(e) = client.start_scan().await {
+            tracing::warn!("Failed to trigger Navidrome scan after consolidate: {}", e);
+        }
     }
 
     Ok(())

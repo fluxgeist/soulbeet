@@ -1,4 +1,4 @@
-use api::{delete_library_album, get_library};
+use api::{consolidate_album, delete_library_album, get_library};
 use dioxus::prelude::*;
 use shared::library::AlbumEntry;
 
@@ -17,6 +17,7 @@ pub fn Library() -> Element {
     let mut error = use_signal(|| "".to_string());
     let mut deleting = use_signal(|| None::<String>);
     let mut confirm_delete = use_signal(|| None::<AlbumEntry>);
+    let mut consolidating = use_signal(|| None::<String>);
     let mut sort_mode = use_signal(|| SortMode::Artist);
     let auth = use_auth();
 
@@ -52,6 +53,24 @@ pub fn Library() -> Element {
 
         deleting.set(None);
         confirm_delete.set(None);
+    };
+
+    let handle_consolidate = move |entry: AlbumEntry| async move {
+        let key = format!("{}/{}", entry.artist, entry.album);
+        consolidating.set(Some(key));
+        error.set("".to_string());
+
+        match auth
+            .call(consolidate_album(entry.artist.clone(), entry.album.clone()))
+            .await
+        {
+            Ok(_) => {
+                fetch_library().await;
+            }
+            Err(e) => error.set(format!("Failed to consolidate: {e}")),
+        }
+
+        consolidating.set(None);
     };
 
     let mut sorted = albums.read().clone();
@@ -185,8 +204,10 @@ pub fn Library() -> Element {
                                         {
                                             artist_albums.iter().map(|entry| {
                                                 let entry_for_delete = entry.clone();
+                                                let entry_for_consolidate = entry.clone();
                                                 let key = format!("{}/{}", entry.artist, entry.album);
                                                 let is_deleting = deleting.read().as_deref() == Some(&key);
+                                                let is_consolidating = consolidating.read().as_deref() == Some(&key);
                                                 let track_label = if entry.track_count == 1 { "track" } else { "tracks" };
                                                 rsx! {
                                                     div {
@@ -198,11 +219,19 @@ pub fn Library() -> Element {
                                                                 "{entry.track_count} {track_label}"
                                                             }
                                                         }
-                                                        button {
-                                                            class: "sm:opacity-0 sm:group-hover:opacity-100 text-xs font-mono text-gray-500 hover:text-red-400 transition-all underline decoration-dotted ml-4 shrink-0",
-                                                            disabled: is_deleting,
-                                                            onclick: move |_| confirm_delete.set(Some(entry_for_delete.clone())),
-                                                            if is_deleting { "Deleting..." } else { "Delete" }
+                                                        div { class: "flex items-center gap-3 ml-4 shrink-0 sm:opacity-0 sm:group-hover:opacity-100 transition-all",
+                                                            button {
+                                                                class: "text-xs font-mono text-gray-500 hover:text-beet-accent underline decoration-dotted",
+                                                                disabled: is_consolidating || is_deleting,
+                                                                onclick: move |_| handle_consolidate(entry_for_consolidate.clone()),
+                                                                if is_consolidating { "Fixing..." } else { "Fix in Navidrome" }
+                                                            }
+                                                            button {
+                                                                class: "text-xs font-mono text-gray-500 hover:text-red-400 underline decoration-dotted",
+                                                                disabled: is_deleting || is_consolidating,
+                                                                onclick: move |_| confirm_delete.set(Some(entry_for_delete.clone())),
+                                                                if is_deleting { "Deleting..." } else { "Delete" }
+                                                            }
                                                         }
                                                     }
                                                 }
@@ -220,8 +249,10 @@ pub fn Library() -> Element {
                     {
                         sorted.iter().map(|entry| {
                             let entry_for_delete = entry.clone();
+                            let entry_for_consolidate = entry.clone();
                             let key = format!("{}/{}", entry.artist, entry.album);
                             let is_deleting = deleting.read().as_deref() == Some(&key);
+                            let is_consolidating = consolidating.read().as_deref() == Some(&key);
                             let track_label = if entry.track_count == 1 { "track" } else { "tracks" };
                             rsx! {
                                 div {
@@ -233,14 +264,22 @@ pub fn Library() -> Element {
                                             "{entry.artist} · {entry.track_count} {track_label}"
                                         }
                                     }
-                                    button {
-                                        class: "sm:opacity-0 sm:group-hover:opacity-100 text-xs font-mono text-gray-500 hover:text-red-400 transition-all underline decoration-dotted ml-4 shrink-0",
-                                        disabled: is_deleting,
-                                        onclick: move |_| confirm_delete.set(Some(entry_for_delete.clone())),
-                                        if is_deleting { "Deleting..." } else { "Delete" }
+                                    div { class: "flex items-center gap-3 ml-4 shrink-0 sm:opacity-0 sm:group-hover:opacity-100 transition-all",
+                                        button {
+                                            class: "text-xs font-mono text-gray-500 hover:text-beet-accent underline decoration-dotted",
+                                            disabled: is_consolidating || is_deleting,
+                                            onclick: move |_| handle_consolidate(entry_for_consolidate.clone()),
+                                            if is_consolidating { "Fixing..." } else { "Fix in Navidrome" }
+                                        }
+                                        button {
+                                            class: "text-xs font-mono text-gray-500 hover:text-red-400 underline decoration-dotted",
+                                            disabled: is_deleting || is_consolidating,
+                                            onclick: move |_| confirm_delete.set(Some(entry_for_delete.clone())),
+                                            if is_deleting { "Deleting..." } else { "Delete" }
+                                        }
                                     }
                                 }
-                            }
+            }
                         })
                     }
                 }

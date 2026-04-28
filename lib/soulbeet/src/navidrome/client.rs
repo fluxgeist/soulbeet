@@ -523,6 +523,58 @@ impl NavidromeClient {
         Ok(())
     }
 
+    /// Fetch all songs from Navidrome's native API with their per-user ratings.
+    /// The Subsonic search3 endpoint does not return userRating, so this is
+    /// the reliable way to get rating data. Returns only songs with rating > 0.
+    pub async fn get_rated_songs_native(&self) -> Result<Vec<NativeSong>> {
+        let mut all = Vec::new();
+        let page = 500usize;
+        let mut start = 0usize;
+
+        loop {
+            let url = self
+                .base_url
+                .join("api/song")
+                .map_err(|e| SoulseekError::Api {
+                    status: 0,
+                    message: format!("URL error: {}", e),
+                })?;
+
+            let start_str = start.to_string();
+            let end_str = (start + page).to_string();
+
+            let resp = self
+                .native_request(self.client.get(url).query(&[
+                    ("_start", start_str.as_str()),
+                    ("_end", end_str.as_str()),
+                    ("_sort", "id"),
+                    ("_order", "ASC"),
+                ]))
+                .await?;
+
+            if !resp.status().is_success() {
+                break;
+            }
+
+            let songs: Vec<NativeSong> = resp.json().await.map_err(|e| SoulseekError::Api {
+                status: 0,
+                message: format!("Failed to parse native songs response: {}", e),
+            })?;
+
+            let count = songs.len();
+            // Keep only rated songs
+            all.extend(songs.into_iter().filter(|s| s.rating.unwrap_or(0) > 0));
+
+            if count < page {
+                break;
+            }
+            start += page;
+        }
+
+        info!("Fetched {} rated songs via native API", all.len());
+        Ok(all)
+    }
+
     /// Query songs via the native API, filtered to a specific path prefix.
     /// Returns up to `limit` songs whose path contains the given prefix.
     /// The native API returns raw `media_file.path` values (relative to library root).

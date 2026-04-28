@@ -12,146 +12,220 @@ Upstream tip at time of planning: `53038ba`
 
 | Phase | Status |
 |---|---|
-| 1. Setup | ⬜ Not started |
-| 2. Resolve conflicts | ⬜ Not started |
-| 3. Dioxus 0.7.4 upgrade | ⬜ Not started |
-| 4. DB migrations | ⬜ Not started |
-| 5. New env vars | ⬜ Not started |
-| 6. Build & test | ⬜ Not started |
-| 7. Deploy & verify | ⬜ Not started |
+| 1. Setup | ✅ Done |
+| 2. Resolve conflicts | ✅ Done |
+| 3. Dioxus 0.7.4 upgrade | ✅ Done (auto-merged) |
+| 4. DB migrations | ✅ Done |
+| 5. New env vars | ✅ Done |
+| 6. Build & test | ✅ Done |
+| 7. Deploy & verify | 🔄 In progress |
 | 8. Docs update | ⬜ Not started |
 
 ---
 
-## Phase 1 — Setup
+## Phase 1 — Setup ✅
 
-- [ ] Create branch: `git checkout -b feat/upstream-merge`
-- [ ] Add upstream remote: `git remote add upstream https://github.com/terry90/soulbeet.git`
-- [ ] Fetch upstream: `git fetch upstream`
-- [ ] Run merge: `git merge upstream/master --no-commit --no-ff`
-- [ ] Confirm the 7 expected conflict files and no surprises
-
----
-
-## Phase 2 — Resolve Conflicts
-
-### Hard conflicts (need careful manual merge)
-
-- [ ] **`lib/soulbeet/src/beets/mod.rs`** ⚠️ Hardest
-  - Keep our change: remove `-l /app/library/.beets_library.db` flag from beet import command
-  - Keep upstream change: improved timeout/kill logic — spawns child, waits with timeout, explicitly kills on timeout via `child.kill().await`; adds `read_child_stdout` / `read_child_stderr` helpers
-  - These overlap in the same function body — apply both changes to the rewritten function
-
-- [ ] **`Dockerfile`** ⚠️ Hard
-  - Take from upstream: Node 22 via NodeSource, dioxus-cli 0.7.4, clean `npm install` approach
-  - Take from fork: explicit `npm install @tailwindcss/oxide-linux-arm64-gnu` arm64 binding (upstream's Node 22 may already handle this — verify)
-  - Take from fork: `pillow` in pip deps
-  - Entrypoint: use upstream's `/app/server/server` (dioxus 0.7.4 renames binary back to `server`)
-  - Drop: our `--version 0.7.2 --locked` pin (replaced by 0.7.4)
-
-- [ ] **`web/src/main.rs`** ⚠️ Medium
-  - Keep our additions: `LibraryPage` route, Library navbar link + SVG icon, `use ui::LibraryPage`
-  - Keep upstream additions: `DashboardPage` route, `SettingsProvider` wrapper in `App`, `AutoDownloadSignal`, `SearchPrefill`, `start_channel_cleanup_task()` on startup, cfg-gated WebSocket imports
-  - Watch for: upstream restructured the `App` component tree — our navbar RSX additions need to fit inside the new tree
-
-### Easy conflicts (additive only)
-
-- [ ] **`api/Cargo.toml`** — Add our `rusqlite` dep + upstream's new deps (`serde_json`, `aes-gcm`, `sha2`, `base64`, `futures`); reconcile version number to `0.5.2`
-- [ ] **`api/src/server_fns/mod.rs`** — Add our `pub mod library` + upstream's `pub mod discovery`, `pub mod navidrome`, `pub mod settings`; keep upstream's `cleanup_empty_ancestors` function
-- [ ] **`ui/src/components/mod.rs`** — Add our `pub mod library` + upstream's new component modules
-- [ ] **`web/src/views/mod.rs`** — Add our `mod library` + upstream's `mod dashboard`
+- [x] Create branch: `git checkout -b feat/upstream-merge`
+- [x] Add upstream remote: `git remote add upstream https://github.com/terry90/soulbeet.git`
+- [x] Fetch upstream: `git fetch upstream`
+- [x] Run merge: `git merge upstream/master --no-commit --no-ff`
+- [x] Confirm conflict files — only 4 actual conflicts (not 7 as predicted; see Phase 2)
 
 ---
 
-## Phase 3 — Dioxus 0.7.4 Upgrade
+## Phase 2 — Resolve Conflicts ✅
 
-The upstream bumped dioxus from 0.7.2 → 0.7.4. This affects the build pipeline.
+### What auto-merged cleanly (no action needed)
 
-- [ ] Verify `Cargo.toml` (root + workspace members) reflect 0.7.4 dioxus deps
-- [ ] Run `cargo update` to regenerate `Cargo.lock` for new versions
-- [ ] Confirm dioxus-cli pin in Dockerfile is `--version 0.7.4 --locked`
-- [ ] Confirm ENTRYPOINT in Dockerfile is `/app/server/server` (0.7.4 renames binary back from `web` to `server`)
-- [ ] Check `dx bundle` output path has changed accordingly: `target/dx/web/release/server/`
-- [ ] Update Dockerfile `COPY` line if artifact path changed
+- **`lib/soulbeet/src/beets/mod.rs`** — git merged both sides correctly. Upstream's `child.kill().await` logic is fully integrated. Our `-l` flag removal is intact. `read_child_stdout` / `read_child_stderr` helpers present.
+- **`api/src/server_fns/mod.rs`** — our `pub mod library` and upstream's `pub mod discovery/navidrome/settings` both present.
+- **`web/src/views/mod.rs`** — our `mod library` and upstream's `mod dashboard` both present.
+
+### Manually resolved (4 conflicts)
+
+- [x] **`Dockerfile`**
+  - dioxus-cli pinned to `0.7.4 --locked`
+  - Took upstream's clean npm install: `rm -rf node_modules package-lock.json && npm install`
+  - Dropped our explicit `@tailwindcss/oxide-linux-arm64-gnu` install (Node 22 should handle it — **verify in Phase 6**)
+  - `pillow` in pip deps kept
+  - **Manual fix (not a conflict marker):** COPY path was silently auto-merged to our old value (`target/dx/web/release/web`) despite upstream changing it. Manually corrected to `target/dx/web/release/server`. ENTRYPOINT was correctly `server`.
+
+- [x] **`api/Cargo.toml`**
+  - Version is `0.5.2` (upstream's)
+  - All deps present: our `rusqlite = "0.32"` + upstream's `aes-gcm`, `sha2`, `base64`, `futures`
+  - All gated under `server` feature
+
+- [x] **`ui/src/components/mod.rs`**
+  - Both `pub mod library` (ours) and `pub mod error_display` (upstream) present
+
+- [x] **`web/src/main.rs`**
+  - Imports merged: `AutoDownloadSignal`, `SearchPrefill`, `SettingsProvider` from upstream + our `LibraryPage`
+  - Routes: both `/dashboard` (DashboardPage) and `/library` (LibraryPage) present
+  - Navbar: Dashboard link (upstream's bar chart icon) + Library link (our music note icon) both in navbar
+  - `SettingsProvider` wrapping `Router` in `App` component (upstream addition)
+
+**Merge commit:** `0cfb438`
+
+---
+
+## Phase 3 — Dioxus 0.7.4 Upgrade ✅
+
+All done via auto-merge — no manual steps needed:
+
+- [x] Root `Cargo.toml` workspace: `dioxus = { version = "0.7.4" }` (auto-merged)
+- [x] `Cargo.lock` regenerated by merge
+- [x] Dockerfile: `dioxus-cli --version 0.7.4 --locked`
+- [x] ENTRYPOINT: `/app/server/server`
+- [x] COPY path: `target/dx/web/release/server`
 
 ---
 
 ## Phase 4 — DB Migrations
 
-Upstream added 13 new SQL migrations covering multi-user, discovery playlists, recommendation engine, ListenBrainz, per-profile settings.
+14 migration files now in `api/migrations/` (1 original + 13 new from upstream):
 
-- [ ] List all new migration files: `ls api/src/migrations/` and compare to what's in production DB
-- [ ] Check if the migration runner applies them automatically on startup (likely yes — confirm in code)
-- [ ] Identify any migrations that touch existing tables (downloads, items) vs purely new tables
-- [ ] Note: do NOT run migrations against production DB until build is verified — migrations may be irreversible
-- [ ] Plan: test migrations against a copy of the production DB first
+```
+20240523000000_init.sql                    ← original (users, folders)
+20250201000000_user_settings.sql
+20250201000001_app_config.sql
+20260320000000_discovery_and_multi_user.sql
+20260321000000_recommendation_engine.sql
+20260321100000_lastfm_username.sql
+20260322000000_engine_report.sql
+20260322100000_report_history.sql
+20260322200000_multi_profile_default.sql
+20260323000000_discovery_per_user.sql
+20260323100000_per_profile_playlists.sql
+20260323200000_per_profile_tracks.sql
+20260323300000_discovery_history.sql
+20260323400000_per_profile_track_settings.sql
+20260330000000_default_download_folder.sql
+```
+
+- [x] Read each new migration — flag any that ALTER/DROP existing `users` or `folders` tables
+- [x] Confirm sqlx migrate runs automatically: `grep -r "migrate" api/src/`
+- [x] Do NOT deploy until production DB is backed up (Phase 7)
+
+**Findings:**
+- `users` table: 2 new columns added in `20260320000000` (`navidrome_token TEXT`, `navidrome_status TEXT NOT NULL DEFAULT 'unknown'`) — purely additive, existing rows safe
+- `folders` table: never touched by any of the 13 new migrations
+- DROP TABLE operations only affect tables created by earlier upstream migrations (`recommendations`, `discovery_playlists`, `discovery_candidates` rebuilt) — no original data at risk
+- sqlx auto-apply confirmed: `api/src/db.rs:30` — `sqlx::migrate!("./migrations").run(&pool)`
+
+> ⚠️ Migrations are irreversible without a backup restore.
 
 ---
 
 ## Phase 5 — New Env Vars
 
-Upstream's discovery feature requires new configuration.
+**Finding:** `NAVIDROME_MUSIC_PATH` is read via raw `std::env::var()` in `api/src/server_fns/navidrome.rs` — it does NOT need to be added to `AppConfig`. Same pattern for `NAVIDROME_URL/USER/PASSWORD` (already in compose, used via env::var directly).
 
-- [ ] Identify all new env vars added by upstream (check `api/src/config.rs` and compose examples)
-  - `NAVIDROME_MUSIC_PATH` — path prefix mapping for cross-container path resolution (likely `/app/library`)
-  - Possibly: ListenBrainz username (per-user in settings, not env var — verify)
-- [ ] Add new vars to `deployment/docker-compose.yml` with sensible defaults
-- [ ] Document new vars in `project_specs.md`
+- [x] Add `NAVIDROME_MUSIC_PATH=/app/library` to `deployment/docker-compose.yml`
+- [x] No `api/src/config.rs` changes needed
 
 ---
 
 ## Phase 6 — Build & Test
 
-- [ ] Build Docker image locally:
-  ```bash
-  docker buildx build --platform linux/arm64 --output type=docker,name=soulbeet:local,dest=/tmp/soulbeet.tar .
-  ```
-- [ ] Check build log for: dioxus version mismatch warnings, wasm-opt errors, missing deps
-- [ ] Verify WASM binary is freshly built (check content hash in build output)
-- [ ] Smoke test: run container locally (x86 or with QEMU) and hit the UI if possible
-- [ ] Check that existing functionality compiles: library tab, beets import, delete album
+```bash
+docker buildx build --platform linux/arm64 --output type=docker,name=soulbeet:local,dest=/tmp/soulbeet.tar .
+```
+
+- [x] Pre-check: `cargo check --package api --features server && cargo check --package web` — passed
+- [x] Full arm64 Docker build — succeeded; Node 22 handled Tailwind oxide arm64 without explicit `@tailwindcss/oxide-linux-arm64-gnu`
+- [x] Smoke test: login page renders, server starts clean
 
 ---
 
 ## Phase 7 — Deploy & Verify
 
-- [ ] Transfer image to homeserver:
-  ```bash
-  cat /tmp/soulbeet.tar | ssh homeserver 'docker load'
-  ssh homeserver 'cd /opt/soulbeet/deployment && docker compose down && docker compose up -d'
-  ```
-- [ ] Check container logs on startup — watch for migration output and any panics
-- [ ] Verify existing features still work:
-  - [ ] Library tab loads and displays albums
-  - [ ] Sort options work (Artist / Album / Date Added)
-  - [ ] Delete album works (removes files + beets DB + Navidrome)
-  - [ ] Search and download a track end-to-end
-  - [ ] Beets import runs after download completes
-- [ ] Verify new upstream features:
-  - [ ] Cancel download button visible
-  - [ ] One-tap download UX (cover art, inline icons)
-  - [ ] Discovery tab appears (may need Navidrome + ListenBrainz config to fully work)
+> ⚠️ Back up production DBs FIRST — 13 new migrations apply automatically on startup.
+
+```bash
+# Backup
+ssh homeserver 'cp /opt/soulbeet/deployment/data/soulbeet.db \
+  /opt/soulbeet/deployment/data/soulbeet.db.backup-before-upstream-merge'
+ssh homeserver 'cp /opt/soulbeet/deployment/data/musiclibrary.db \
+  /opt/soulbeet/deployment/data/musiclibrary.db.backup-before-upstream-merge'
+
+# Deploy
+cat /tmp/soulbeet.tar | ssh homeserver 'docker load'
+ssh homeserver 'cd /opt/soulbeet/deployment && docker compose down && docker compose up -d'
+ssh homeserver 'docker logs -f deployment-soulbeet-1'
+```
+
+- [x] Confirm 13 migrations applied in startup logs — all 15 versions present in `_sqlx_migrations` (1 original + 14 new)
+- [x] Regression: library tab ✅, sort options ✅, search/download ✅ (slskd URL+key now DB-only — must be set in Settings → Config)
+- [x] Regression: beets import ✅ — confirmed working on Arca "&&&&&" download
+- [x] New feature: cancel download ✅ — confirmed working
+- [ ] Regression: delete album — not yet tested
+- [ ] New feature: "Fix in Navidrome" button (library tab) — hover an album, click "Fix in Navidrome"; verify it consolidates split-directory albums and Navidrome shows a single album entry after the scan (test case: Arca "&&&&&" if still split in Navidrome)
+- [ ] New feature: Dashboard tab — not yet verified
+- [ ] New feature: Discovery tab — requires ListenBrainz username in Settings; not yet configured
+
+**Navidrome integration notes:**
+- Soulbeet player entry in Navidrome is created automatically on first login using Navidrome credentials. Log out of soulbeet and back in with your Navidrome username/password to create it.
+- ReportRealPath enabled on Soulbeet player (Navidrome > Settings > Players) — required for auto-delete and path-based features.
+
+**Manual beets DB fix — Pure Anna (Arca "&&&&&"):**
+Track 13 "Pure Anna" downloaded successfully but beets skipped it on import because the album was already in the library (13 of 14 tracks). Beets treats import as album-level and refuses to add individual tracks to an existing entry. Fixed by direct SQLite insertion via `/usr/bin/python3` inside the distroless container — copied all fields from an existing album track, overrode title/track/path/length/mtime/added, inserted as item id=644. Verified with `beet ls artist:arca` — all 14 tracks present. Navidrome rescan required to pick up the new entry.
+
+**Side effect — Navidrome split album (Arca "&&&&&"):**
+Because "Pure Anna" was inserted manually with a beets DB path pointing to a different directory than the other 13 tracks, Navidrome sees two album entries: one with 13 tracks and one with 1 track. Soulbeet's library tab correctly shows all 14 under one entry (it groups by `(albumartist, album)` regardless of directory). The "Fix in Navidrome" button was added to resolve exactly this: it finds all directories holding tracks for a given `(albumartist, album)`, moves everything into the directory with the most tracks, updates beets DB paths, and triggers a Navidrome scan. Test this on "&&&&&" to verify.
+
+**New feature added during deployment — `consolidate_album` (post-merge, not upstream):**
+Added `POST /api/library/album/consolidate` endpoint (`api/src/server_fns/library.rs`) and a "Fix in Navidrome" hover button in the library UI (`ui/src/components/library/mod.rs`). This is a custom addition to handle the split-directory problem: when beets imports tracks for the same album into multiple directories (manual DB inserts, re-downloads, etc.), Navidrome treats each directory as a separate album. The consolidate action merges all into the canonical directory (most tracks wins) and rescans.
 
 ---
 
 ## Phase 8 — Docs Update
 
-- [ ] Update `Claude/CLAUDE.md`:
-  - Change dioxus-cli version note from 0.7.2 → 0.7.4
-  - Update ENTRYPOINT note (`/app/server/server` not `/app/server/web`)
-- [ ] Update `Claude/project_specs.md`:
-  - Add new env vars (`NAVIDROME_MUSIC_PATH`, etc.)
-  - Add discovery feature to architecture overview
-  - Update version references
-- [ ] Commit and push to `feat/upstream-merge`
-- [ ] Open PR from `feat/upstream-merge` → `feat/library-tab`
+- [ ] `Claude/CLAUDE.md`: update dioxus-cli version (0.7.2 → 0.7.4), ENTRYPOINT (`web` → `server`), artifact path
+- [ ] `Claude/project_specs.md`: add `NAVIDROME_MUSIC_PATH`, discovery feature, version refs
+- [ ] This file: mark all phases complete
+- [ ] Push `feat/upstream-merge`, open PR → `feat/library-tab`
 
 ---
 
-## Notes & Gotchas
+## Potential Issues & Watch Points
 
-- **Arm64 Tailwind binding:** Upstream fixed this via Node 22 — verify their approach works before re-adding our explicit `@tailwindcss/oxide-linux-arm64-gnu` install. If upstream's Node 22 approach works, don't add it again (avoid double-install).
-- **Discovery requires Navidrome integration:** The discovery engine needs `NAVIDROME_URL`, `NAVIDROME_USER`, `NAVIDROME_PASSWORD` (already in compose) plus `NAVIDROME_MUSIC_PATH` (new). Without it the Discovery tab will show an error/status banner — that's expected.
-- **ListenBrainz username:** Set per-user in Settings UI, not an env var. Users need to add their LB username in the app to get recommendations.
-- **13 new migrations:** These will run automatically on first startup. Back up production DB before deploying.
-- **Binary rename:** dioxus 0.7.4 renames the binary back to `server` (was `web` in 0.7.2). This is the opposite of the bug we already fixed — don't get confused.
+### 🟡 arm64 Tailwind binding (Phase 6 decision point)
+We dropped the explicit `npm install @tailwindcss/oxide-linux-arm64-gnu` in favour of upstream's Node 22 clean-install approach. If the arm64 Docker build fails with an oxide native binding error, add back:
+```dockerfile
+RUN rm -rf node_modules package-lock.json && npm install && npm install @tailwindcss/oxide-linux-arm64-gnu
+```
+
+### 🟡 Dockerfile COPY path — two-step correction
+First: the merge silently kept the old COPY path (`target/dx/web/release/web`) while ENTRYPOINT auto-merged to `server` — caught and fixed in Phase 2.
+Second: the actual dioxus 0.7.4 output structure adds an extra directory level. The real path is `target/dx/web/release/web/server`, not `target/dx/web/release/server` as originally assumed. Discovered during Phase 6 build (COPY failed with "not found"). Final correct Dockerfile line:
+```dockerfile
+COPY --from=builder /app/target/dx/web/release/web/server /app/server
+```
+ENTRYPOINT `/app/server/server` is correct as-is.
+
+### 🟡 `NAVIDROME_MUSIC_PATH` not set yet
+Without it, the navidrome server fn's path resolution falls back gracefully — it won't crash, but discovery path features won't work. Set it to `/app/library` in `deployment/docker-compose.yml` before deploying.
+
+### 🟡 Navidrome `ReportRealPath` required for path features
+The auto-merged `NavidromeBanner` component now shows a specific `MissingReportRealPath` status when the Soulbeet Navidrome player doesn't have `ReportRealPath` enabled. Without it, path-based features (auto-delete, discovery path resolution) won't work. Enable in Navidrome > Settings > Players.
+
+### 🔴 slskd URL + API key moved from env vars to DB (breaking change)
+Upstream removed `SLSKD_URL` and `SLSKD_API_KEY` from `AppConfig` (env vars). They are now stored in the `app_config` DB table and configured via Settings → Config in the UI. The env var `SLSKD_DOWNLOAD_PATH` was also renamed to `DOWNLOAD_PATH`. docker-compose.yml updated accordingly. After deploying, the slskd URL and API key must be entered once in the UI — they persist in the DB.
+
+### 🔴 13 new migrations are irreversible
+They run automatically on startup. Once applied you cannot roll back without restoring the backup. This is the single highest-risk step. Do NOT skip the Phase 7 backup.
+
+### 🟡 `lib/shared/src/musicbrainz.rs` deleted by upstream
+Upstream renamed this to `lib/shared/src/metadata.rs`. Our library tab code doesn't import from `shared::musicbrainz` (it uses beets SQLite directly), so no breakage expected. If a future library feature needs MusicBrainz data from the shared crate, use `shared::metadata` instead.
+
+### 🟡 Discovery/Dashboard require ListenBrainz config to be useful
+The Discovery tab will appear in the navbar but show an error or empty state without a ListenBrainz username set. This is expected — users configure it per-profile in Settings > (new preferences section). Not a bug.
+
+---
+
+## Notes
+
+- **Arm64 Tailwind binding:** Upstream fixed this via Node 22 — verify their approach works before re-adding our explicit `@tailwindcss/oxide-linux-arm64-gnu` install.
+- **Discovery requires Navidrome integration:** `NAVIDROME_URL`, `NAVIDROME_USER`, `NAVIDROME_PASSWORD` (already in compose) + `NAVIDROME_MUSIC_PATH` (add to compose). Read via raw `env::var`, not through `AppConfig`.
+- **ListenBrainz username:** Set per-user in Settings UI, not an env var.
+- **Binary rename confirmed:** dioxus 0.7.4 outputs `server` (was `web` in 0.7.2). Both Dockerfile lines updated.

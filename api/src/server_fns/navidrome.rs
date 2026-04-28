@@ -39,6 +39,15 @@ pub async fn sync_ratings_internal(user_id: &str) -> Result<SyncResult, String> 
 
     let total_songs_scanned = songs.len() as u32;
 
+    // Navidrome's Subsonic search3 does not return userRating in responses.
+    // Fetch ratings separately via the native API — these are the authoritative source.
+    let native_rated_songs = client.get_rated_songs_native().await.unwrap_or_default();
+    // Rating map keyed by song ID for discovery promotion/removal (uses search3 song IDs)
+    let native_ratings: std::collections::HashMap<String, u8> = native_rated_songs
+        .iter()
+        .filter_map(|s| s.rating.map(|r| (s.id.clone(), r)))
+        .collect();
+
     let user_settings = UserSettings::get(user_id).await?;
     let promote_threshold = user_settings.discovery_promote_threshold;
     let auto_delete = user_settings.auto_delete_enabled;
@@ -60,67 +69,61 @@ pub async fn sync_ratings_internal(user_id: &str) -> Result<SyncResult, String> 
         vec![]
     };
 
-    for song in &songs {
-        // Auto-delete 1-star tracks (when enabled)
-        if auto_delete {
-            if let Some(rating) = song.user_rating {
-                if rating == 1 {
-                    let shared_veto = song.average_rating.map(|avg| avg > 1.0).unwrap_or(false);
-                    if shared_veto {
-                        info!(
-                            "Auto-delete skipped (shared veto, avg={:.1}): {} - {}",
-                            song.average_rating.unwrap_or(0.0),
-                            song.artist.as_deref().unwrap_or("?"),
-                            song.title
-                        );
-                        skipped_veto += 1;
-                    } else if let Some(ref path_str) = song.path {
-                        // Skip auto-delete for pending discovery tracks (handled separately below)
-                        let is_discovery = pending_discovery_tracks.iter().any(|dt| {
-                            dt.song_id.as_deref() == Some(&song.id)
-                                || std::path::Path::new(&dt.path)
-                                    .file_name()
-                                    .map(|f| f.to_ascii_lowercase())
-                                    == std::path::Path::new(path_str)
-                                        .file_name()
-                                        .map(|f| f.to_ascii_lowercase())
-                        });
-                        if is_discovery {
-                            continue;
-                        }
-                        // Navidrome stores relative paths from its library root.
-                        // Resolve to a local absolute path by trying each user folder.
-                        if let Some(local_path) = resolve_navidrome_path(path_str, &folders) {
-                            let path = std::path::Path::new(&local_path);
-                            if let Err(e) = tokio::fs::remove_file(path).await {
-                                warn!("Auto-delete failed for {}: {}", path.display(), e);
-                            } else {
-                                if let Some(parent) = path.parent() {
-                                    let _ = super::cleanup_empty_ancestors(parent).await;
-                                }
-                                DeletionReviewRow::upsert(
-                                    &song.id,
-                                    &song.title,
-                                    song.artist.as_deref().unwrap_or("Unknown"),
-                                    song.album.as_deref().unwrap_or("Unknown"),
-                                    Some(&local_path),
-                                    Some(rating),
-                                    user_id,
-                                )
-                                .await?;
-                                deleted_tracks += 1;
-                            }
-                        } else {
-                            real_path_failures += 1;
-                            skipped_not_found += 1;
-                        }
+    // Auto-delete 1-star tracks. NativeSong.path is relative to the Navidrome library root,
+    // so we resolve it by prepending each configured folder path (no Subsonic ID matching needed).
+    if auto_delete {
+        for native_song in native_rated_songs.iter().filter(|s| s.rating == Some(1)) {
+            let is_discovery = pending_discovery_tracks.iter().any(|dt| {
+                std::path::Path::new(&dt.path)
+                    .file_name()
+                    .map(|f| f.to_ascii_lowercase())
+                    == std::path::Path::new(&native_song.path)
+                        .file_name()
+                        .map(|f| f.to_ascii_lowercase())
+            });
+            if is_discovery {
+                continue;
+            }
+
+            let resolved = folders.iter().find_map(|f| {
+                let candidate = format!(
+                    "{}/{}",
+                    f.path.trim_end_matches('/'),
+                    native_song.path
+                );
+                std::path::Path::new(&candidate).exists().then_some(candidate)
+            });
+
+            if let Some(local_path) = resolved {
+                let path = std::path::Path::new(&local_path);
+                if let Err(e) = tokio::fs::remove_file(path).await {
+                    warn!("Auto-delete failed for {}: {}", path.display(), e);
+                } else {
+                    if let Some(parent) = path.parent() {
+                        let _ = super::cleanup_empty_ancestors(parent).await;
                     }
+                    let meta = songs.iter().find(|s| s.id == native_song.id);
+                    DeletionReviewRow::upsert(
+                        &native_song.id,
+                        &native_song.title,
+                        meta.and_then(|s| s.artist.as_deref()).unwrap_or("Unknown"),
+                        meta.and_then(|s| s.album.as_deref()).unwrap_or("Unknown"),
+                        Some(&local_path),
+                        Some(1),
+                        user_id,
+                    )
+                    .await?;
+                    deleted_tracks += 1;
                 }
+            } else {
+                real_path_failures += 1;
+                skipped_not_found += 1;
             }
         }
+    }
 
-        // Check discovery track promotion/removal
-        if let Some(user_rating) = song.user_rating {
+    for song in &songs {
+        if let Some(user_rating) = song.user_rating.or_else(|| native_ratings.get(&song.id).copied()) {
             // Match by song_id first (exact), then by filename (fuzzy).
             // song_id is authoritative when set by reconciliation.
             let matching_track = pending_discovery_tracks.iter().find(|dt| {
@@ -190,6 +193,14 @@ pub async fn sync_ratings_internal(user_id: &str) -> Result<SyncResult, String> 
             );
         }
     }
+    if deleted_tracks > 0 || removed_tracks > 0 {
+        if let Err(e) = client.start_scan().await {
+            warn!("Failed to trigger Navidrome rescan after deletions: {}", e);
+        } else {
+            info!("Triggered Navidrome rescan to remove {} deleted file(s)", deleted_tracks + removed_tracks);
+        }
+    }
+
     info!(
         "Ratings sync complete: {} songs scanned, {} deleted, {} promoted, {} removed",
         total_songs_scanned, deleted_tracks, promoted_tracks, removed_tracks
@@ -264,14 +275,12 @@ fn resolve_navidrome_path(
         return None;
     }
 
-    let local_root = folders
-        .first()
-        .and_then(|f| std::path::Path::new(&f.path).parent())
-        .map(|p| p.to_string_lossy().to_string())?;
-
-    let resolved = format!("{}{}", local_root, rest);
-    if std::path::Path::new(&resolved).exists() {
-        return Some(resolved);
+    for folder in folders {
+        let local_root = folder.path.trim_end_matches('/');
+        let candidate = format!("{}{}", local_root, rest);
+        if std::path::Path::new(&candidate).exists() {
+            return Some(candidate);
+        }
     }
 
     None
